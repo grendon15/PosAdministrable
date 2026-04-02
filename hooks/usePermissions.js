@@ -3,93 +3,104 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
 export function usePermissions() {
+  const [permisos, setPermisos] = useState({});
   const [cargando, setCargando] = useState(true);
-  const [rol, setRol] = useState(null);
-  const [permisos, setPermisos] = useState([]);
-  const [rolNombre, setRolNombre] = useState('');
+  const [rolNombre, setRolNombre] = useState(null);
+  const [usuarioId, setUsuarioId] = useState(null);
 
   useEffect(() => {
-    obtenerPermisos();
+    cargarPermisos();
   }, []);
 
-  async function obtenerPermisos() {
+  async function cargarPermisos() {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      setCargando(true);
       
+      const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         setCargando(false);
         return;
       }
-
-      // Intentar obtener de localStorage primero
-      const storedRole = localStorage.getItem('userRole');
-      if (storedRole) {
-        setRolNombre(storedRole);
-      }
-
-      // Obtener de la base de datos
-      const { data: usuario, error } = await supabase
+      
+      setUsuarioId(user.id);
+      
+      // Obtener rol del usuario
+      const { data: usuarioData } = await supabase
         .from('usuarios')
-        .select('*, roles(*)')
+        .select('rol_id, roles(nombre)')
         .eq('id', user.id)
-        .maybeSingle();
+        .single();
 
-      if (error) {
-        console.error('Error obteniendo usuario:', error);
+      if (!usuarioData) {
+        setCargando(false);
+        return;
       }
 
-      if (usuario?.roles) {
-        setRolNombre(usuario.roles.nombre);
-        setRol(usuario.roles);
-        
-        // Obtener permisos
-        const { data: permisosData } = await supabase
-          .from('permisos')
-          .select('*')
-          .eq('rol_id', usuario.rol_id);
-        
-        setPermisos(permisosData || []);
+      const rolId = usuarioData.rol_id;
+      const rol = usuarioData.roles?.nombre;
+      setRolNombre(rol);
+
+      // Obtener permisos del rol
+      const { data: permisosData } = await supabase
+        .from('permisos')
+        .select('*')
+        .eq('rol_id', rolId);
+
+      const permisosMap = {};
+      permisosData?.forEach(p => {
+        permisosMap[p.modulo] = {
+          ver: p.ver,
+          crear: p.crear,
+          editar: p.editar,
+          eliminar: p.eliminar
+        };
+      });
+
+      // Si es administrador, asegurar todos los permisos
+      if (rol === 'Administrador') {
+        const todosModulos = ['dashboard', 'menu', 'pedidos', 'ventas', 'inventario', 'recetas', 'pos', 'caja', 'usuarios', 'configuracion'];
+        todosModulos.forEach(modulo => {
+          if (!permisosMap[modulo]) {
+            permisosMap[modulo] = { ver: true, crear: true, editar: true, eliminar: true };
+          } else {
+            permisosMap[modulo] = { ...permisosMap[modulo], ver: true, crear: true, editar: true, eliminar: true };
+          }
+        });
       }
 
+      setPermisos(permisosMap);
+      
     } catch (error) {
-      console.error('Error en usePermissions:', error);
+      console.error('Error cargando permisos:', error);
     } finally {
       setCargando(false);
     }
   }
 
-  function puedeVer(modulo) {
-    if (rolNombre === 'Administrador') return true;
-    const permiso = permisos.find(p => p.modulo === modulo);
-    return permiso?.ver || false;
-  }
+  const puedeVer = (modulo) => {
+    return permisos[modulo]?.ver || false;
+  };
 
-  function puedeCrear(modulo) {
-    if (rolNombre === 'Administrador') return true;
-    const permiso = permisos.find(p => p.modulo === modulo);
-    return permiso?.crear || false;
-  }
+  const puedeCrear = (modulo) => {
+    return permisos[modulo]?.crear || false;
+  };
 
-  function puedeEditar(modulo) {
-    if (rolNombre === 'Administrador') return true;
-    const permiso = permisos.find(p => p.modulo === modulo);
-    return permiso?.editar || false;
-  }
+  const puedeEditar = (modulo) => {
+    return permisos[modulo]?.editar || false;
+  };
 
-  function puedeEliminar(modulo) {
-    if (rolNombre === 'Administrador') return true;
-    const permiso = permisos.find(p => p.modulo === modulo);
-    return permiso?.eliminar || false;
-  }
+  const puedeEliminar = (modulo) => {
+    return permisos[modulo]?.eliminar || false;
+  };
 
-  return {
-    cargando,
-    rol,
+  return { 
+    permisos, 
+    puedeVer, 
+    puedeCrear, 
+    puedeEditar, 
+    puedeEliminar, 
+    cargando, 
     rolNombre,
-    permisos,
-    puedeVer,
-    puedeCrear,
-    puedeEditar,
-    puedeEliminar
+    usuarioId 
   };
 }

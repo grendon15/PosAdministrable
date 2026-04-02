@@ -5,10 +5,12 @@ import { supabase } from '@/lib/supabase';
 import Link from 'next/link';
 import LoadingAnimation from '@/components/LoadingAnimation';
 import { usePermissions } from '@/hooks/usePermissions';
+import NotificationCenter from '@/components/NotificationCenter';
 
 export default function DashboardLayout({ children }) {
   const [cargando, setCargando] = useState(true);
   const [user, setUser] = useState(null);
+  const [notificacionesCount, setNotificacionesCount] = useState(0);
   const router = useRouter();
   const pathname = usePathname();
   const { puedeVer, cargando: cargandoPermisos, rolNombre } = usePermissions();
@@ -149,24 +151,23 @@ export default function DashboardLayout({ children }) {
 
       {/* Main content */}
       <main className="flex-1 md:ml-72">
-        {/* Header simple sin notificaciones */}
-        <div className="bg-white shadow-sm sticky top-0 z-10">
-          <div className="px-6 py-3 flex justify-between items-center">
-            <div></div>
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-3">
-                <div className="text-right">
-                  <p className="text-sm font-medium text-[#025373]">{user?.email}</p>
-                  <button
-                    onClick={cerrarSesion}
-                    className="text-xs text-[#595959] hover:text-red-500 transition-colors"
-                  >
-                    Cerrar sesión
-                  </button>
-                </div>
-                <div className="w-8 h-8 rounded-full bg-[#116EBF] text-white flex items-center justify-center">
-                  {user?.email?.charAt(0)?.toUpperCase() || 'U'}
-                </div>
+        {/* Header con notificaciones */}
+        <div className="bg-white shadow-sm sticky top-0 z-10 border-b border-gray-100">
+          <div className="px-6 py-3 flex justify-end items-center gap-4">
+            <NotificationCenter onNotificationCount={setNotificacionesCount} />
+            <div className="flex items-center gap-3">
+              <div className="text-right">
+                <p className="text-sm font-medium text-[#025373]">{user?.email}</p>
+                <p className="text-xs text-[#3BD9D9]">Rol: {rolNombre}</p>
+                <button
+                  onClick={cerrarSesion}
+                  className="text-xs text-[#595959] hover:text-red-500 transition-colors"
+                >
+                  Cerrar sesión
+                </button>
+              </div>
+              <div className="w-8 h-8 rounded-full bg-[#116EBF] text-white flex items-center justify-center">
+                {user?.email?.charAt(0)?.toUpperCase() || 'U'}
               </div>
             </div>
           </div>

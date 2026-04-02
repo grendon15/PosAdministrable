@@ -2,20 +2,15 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import LoadingAnimation from '@/components/LoadingAnimation';
-import TicketPrinter from '@/components/TicketPrinter';
-import ComandaPrinter from '@/components/ComandaPrinter';
 import NotificationToast from '@/components/NotificationToast';
-import { usePermissions } from '@/hooks/usePermissions';
 
 export default function POSPage() {
   const [categorias, setCategorias] = useState([]);
   const [productos, setProductos] = useState([]);
   const [combos, setCombos] = useState([]);
   const [productosFiltrados, setProductosFiltrados] = useState([]);
-  const [recetas, setRecetas] = useState([]);
   const [configIva, setConfigIva] = useState([]);
   const [mediosPago, setMediosPago] = useState([]);
-  const [configImpresion, setConfigImpresion] = useState({ ticket: true, comanda: true });
   const [cargando, setCargando] = useState(true);
   const [carrito, setCarrito] = useState([]);
   const [categoriaSeleccionada, setCategoriaSeleccionada] = useState('');
@@ -27,16 +22,14 @@ export default function POSPage() {
   const [cierreActivo, setCierreActivo] = useState(null);
   const [verificandoCaja, setVerificandoCaja] = useState(true);
   
-  // Permisos
-  const { puedeVer, puedeCrear, cargando: cargandoPermisos } = usePermissions();
-  const tienePermiso = puedeVer('pos');
-  const puedeCrearPedido = puedeCrear('pos');
-  
+  // Modal para combos
   const [modalCombo, setModalCombo] = useState({ 
     open: false, 
     combo: null, 
     productosSeleccionados: [] 
   });
+  
+  // Estados para el pedido
   const [modalResumen, setModalResumen] = useState(false);
   const [modalPago, setModalPago] = useState(false);
   const [procesando, setProcesando] = useState(false);
@@ -44,7 +37,7 @@ export default function POSPage() {
   
   const [configPedido, setConfigPedido] = useState({
     tipo: 'mesa',
-    mesa: '',
+    mesa: '1',  // Mesa por defecto
     iva_id: '',
     medio_pago_id: '',
     descuento_valor: 0,
@@ -52,19 +45,11 @@ export default function POSPage() {
     observaciones: ''
   });
   
-  const [pagoData, setPagoData] = useState({ monto_pagado: 0, cambio: 0 });
-
-  const { imprimirTicket } = TicketPrinter();
-  const { imprimirComanda } = ComandaPrinter();
+  const [pagoData, setPagoData] = useState({ monto_pagado: '', cambio: 0 });
 
   useEffect(() => {
-    if (tienePermiso) {
-      verificarCajaAbierta();
-    } else {
-      setCargando(false);
-      setVerificandoCaja(false);
-    }
-  }, [tienePermiso]);
+    verificarCajaAbierta();
+  }, []);
 
   useEffect(() => {
     if (cajaAbierta) {
@@ -89,7 +74,7 @@ export default function POSPage() {
       .select('*')
       .eq('fecha', fecha)
       .eq('cerrado', false)
-      .single();
+      .maybeSingle();
     
     if (data) {
       setCajaAbierta(true);
@@ -104,18 +89,21 @@ export default function POSPage() {
   async function cargarDatos() {
     setCargando(true);
     
+    // Cargar categorías
     const { data: categoriasData } = await supabase
       .from('categorias')
       .select('*')
       .eq('activo', true)
       .order('nombre');
     
+    // Cargar productos activos
     const { data: productosData } = await supabase
       .from('productos')
       .select('*, categorias(*)')
       .eq('activo', true)
       .order('nombre');
     
+    // Cargar combos activos
     const { data: combosData } = await supabase
       .from('combos')
       .select(`
@@ -128,36 +116,25 @@ export default function POSPage() {
       .eq('activo', true)
       .order('nombre');
     
-    const { data: recetasData } = await supabase
-      .from('recetas')
-      .select('*');
-    
+    // Cargar configuración de IVA
     const { data: ivaData } = await supabase
       .from('config_iva')
       .select('*')
       .eq('activo', true);
     
+    // Cargar medios de pago
     const { data: mediosData } = await supabase
       .from('medios_pago')
       .select('*')
       .eq('activo', true);
     
-    const { data: impresionData } = await supabase
-      .from('config_impresion')
-      .select('*');
-    
-    const configTicket = impresionData?.find(c => c.tipo === 'ticket')?.activo ?? true;
-    const configComanda = impresionData?.find(c => c.tipo === 'comanda')?.activo ?? true;
-    
-    setConfigImpresion({ ticket: configTicket, comanda: configComanda });
-    
     setCategorias(categoriasData || []);
     setProductos(productosData || []);
     setCombos(combosData || []);
-    setRecetas(recetasData || []);
     setConfigIva(ivaData || []);
     setMediosPago(mediosData || []);
     
+    // Seleccionar valores por defecto
     if (ivaData && ivaData.length > 0 && !configPedido.iva_id) {
       setConfigPedido(prev => ({ ...prev, iva_id: ivaData[0].id.toString() }));
     }
@@ -180,47 +157,7 @@ export default function POSPage() {
     setProductosFiltrados(filtrados);
   }
 
-  function abrirSelectorCombo(combo) {
-    const productosIniciales = combo.combo_productos.map(cp => ({
-      id: cp.producto_id,
-      nombre: cp.productos?.nombre || 'Producto',
-      precio_adicional: cp.precio_adicional || 0,
-      cantidad: cp.cantidad || 1,
-      seleccionado: false
-    }));
-    setModalCombo({ open: true, combo: combo, productosSeleccionados: productosIniciales });
-  }
-
-  function calcularPrecioCombo(combo, productosSeleccionados) {
-    let precioTotal = combo.precio_base || 0;
-    productosSeleccionados.forEach(prod => {
-      if (prod.seleccionado) {
-        precioTotal += (prod.precio_adicional * prod.cantidad);
-      }
-    });
-    return precioTotal;
-  }
-
-  function agregarComboPersonalizado() {
-    const productosSeleccionados = modalCombo.productosSeleccionados.filter(p => p.seleccionado);
-    if (productosSeleccionados.length === 0) {
-      mostrarNotificacion('Selecciona al menos un producto del combo', 'error');
-      return;
-    }
-    const precioTotal = calcularPrecioCombo(modalCombo.combo, modalCombo.productosSeleccionados);
-    setCarrito([...carrito, {
-      id: `combo-${modalCombo.combo.id}-${Date.now()}`,
-      tipo: 'combo',
-      nombre: `🎯 ${modalCombo.combo.nombre}`,
-      precio_venta: precioTotal,
-      cantidad: 1,
-      subtotal: precioTotal,
-      combo_original: { ...modalCombo.combo, productosSeleccionados: productosSeleccionados }
-    }]);
-    setModalCombo({ open: false, combo: null, productosSeleccionados: [] });
-    mostrarNotificacion(`Combo "${modalCombo.combo.nombre}" agregado al pedido`, 'success');
-  }
-
+  // Funciones del carrito
   function agregarProductoAlCarrito(producto) {
     const itemExistente = carrito.find(i => i.id === producto.id && i.tipo !== 'combo');
     if (itemExistente) {
@@ -267,6 +204,49 @@ export default function POSPage() {
     }
   }
 
+  // Funciones de combos
+  function abrirSelectorCombo(combo) {
+    const productosIniciales = combo.combo_productos.map(cp => ({
+      id: cp.producto_id,
+      nombre: cp.productos?.nombre || 'Producto',
+      precio_adicional: cp.precio_adicional || 0,
+      cantidad: cp.cantidad || 1,
+      seleccionado: false
+    }));
+    setModalCombo({ open: true, combo: combo, productosSeleccionados: productosIniciales });
+  }
+
+  function calcularPrecioCombo(combo, productosSeleccionados) {
+    let precioTotal = combo.precio_base || 0;
+    productosSeleccionados.forEach(prod => {
+      if (prod.seleccionado) {
+        precioTotal += (prod.precio_adicional * prod.cantidad);
+      }
+    });
+    return precioTotal;
+  }
+
+  function agregarComboPersonalizado() {
+    const productosSeleccionados = modalCombo.productosSeleccionados.filter(p => p.seleccionado);
+    if (productosSeleccionados.length === 0) {
+      mostrarNotificacion('Selecciona al menos un producto del combo', 'error');
+      return;
+    }
+    const precioTotal = calcularPrecioCombo(modalCombo.combo, modalCombo.productosSeleccionados);
+    setCarrito([...carrito, {
+      id: `combo-${modalCombo.combo.id}-${Date.now()}`,
+      tipo: 'combo',
+      nombre: `🎯 ${modalCombo.combo.nombre}`,
+      precio_venta: precioTotal,
+      cantidad: 1,
+      subtotal: precioTotal,
+      combo_original: { ...modalCombo.combo, productosSeleccionados: productosSeleccionados }
+    }]);
+    setModalCombo({ open: false, combo: null, productosSeleccionados: [] });
+    mostrarNotificacion(`Combo "${modalCombo.combo.nombre}" agregado al pedido`, 'success');
+  }
+
+  // Cálculos de totales
   const totalProductos = carrito.reduce((sum, item) => sum + item.subtotal, 0);
   const ivaSeleccionado = configIva.find(i => i.id === parseInt(configPedido.iva_id));
   const porcentajeIva = ivaSeleccionado?.porcentaje || 0;
@@ -300,81 +280,12 @@ export default function POSPage() {
       verificarCajaAbierta();
       return;
     }
-    if (!puedeCrearPedido) {
-      mostrarNotificacion('No tienes permisos para crear pedidos', 'error');
-      return;
-    }
     setModalResumen(true);
-  }
-
-  async function verificarInventario() {
-    for (const item of carrito) {
-      if (item.tipo === 'combo') {
-        for (const comboProducto of item.combo_original?.productosSeleccionados || []) {
-          const recetasProducto = recetas.filter(r => r.producto_id === comboProducto.id);
-          for (const receta of recetasProducto) {
-            const { data: itemInventario } = await supabase
-              .from('items_inventario')
-              .select('stock_actual, nombre')
-              .eq('id', receta.item_inventario_id)
-              .single();
-            const cantidadNecesaria = receta.cantidad_necesaria * comboProducto.cantidad * item.cantidad;
-            if (itemInventario && itemInventario.stock_actual < cantidadNecesaria) {
-              return { suficiente: false, faltante: itemInventario.nombre, disponible: itemInventario.stock_actual, necesario: cantidadNecesaria };
-            }
-          }
-        }
-      } else {
-        const recetasProducto = recetas.filter(r => r.producto_id === item.id);
-        for (const receta of recetasProducto) {
-          const { data: itemInventario } = await supabase
-            .from('items_inventario')
-            .select('stock_actual, nombre')
-            .eq('id', receta.item_inventario_id)
-            .single();
-          const cantidadNecesaria = receta.cantidad_necesaria * item.cantidad;
-          if (itemInventario && itemInventario.stock_actual < cantidadNecesaria) {
-            return { suficiente: false, faltante: itemInventario.nombre, disponible: itemInventario.stock_actual, necesario: cantidadNecesaria };
-          }
-        }
-      }
-    }
-    return { suficiente: true };
-  }
-
-  async function actualizarInventario() {
-    for (const item of carrito) {
-      if (item.tipo === 'combo') {
-        for (const comboProducto of item.combo_original?.productosSeleccionados || []) {
-          const recetasProducto = recetas.filter(r => r.producto_id === comboProducto.id);
-          for (const receta of recetasProducto) {
-            const cantidadDescontar = receta.cantidad_necesaria * comboProducto.cantidad * item.cantidad;
-            await supabase.rpc('descontar_inventario', { p_item_id: receta.item_inventario_id, p_cantidad: cantidadDescontar });
-          }
-        }
-      } else {
-        const recetasProducto = recetas.filter(r => r.producto_id === item.id);
-        for (const receta of recetasProducto) {
-          const cantidadDescontar = receta.cantidad_necesaria * item.cantidad;
-          await supabase.rpc('descontar_inventario', { p_item_id: receta.item_inventario_id, p_cantidad: cantidadDescontar });
-        }
-      }
-    }
-  }
-
-  async function getConfigImpresionProducto(productoId) {
-    const { data } = await supabase
-      .from('config_producto_impresion')
-      .select('imprimir_comanda')
-      .eq('producto_id', productoId)
-      .single();
-    return data?.imprimir_comanda !== false;
   }
 
   async function finalizarPedido() {
     if (!cajaAbierta) {
-      mostrarNotificacion('La caja debe estar abierta para realizar pedidos', 'error');
-      verificarCajaAbierta();
+      mostrarNotificacion('La caja debe estar abierta', 'error');
       return;
     }
     
@@ -382,24 +293,21 @@ export default function POSPage() {
       mostrarNotificacion('Selecciona un medio de pago', 'error');
       return;
     }
-    if (pagoData.monto_pagado < totalNeto) {
-      mostrarNotificacion(`El monto pagado ($${pagoData.monto_pagado.toLocaleString()}) es menor al total ($${totalNeto.toLocaleString()})`, 'error');
+    
+    const montoPagado = parseFloat(pagoData.monto_pagado);
+    if (isNaN(montoPagado) || montoPagado < totalNeto) {
+      mostrarNotificacion(`El monto pagado ($${montoPagado || 0}) es menor al total ($${totalNeto})`, 'error');
       return;
     }
     
     setProcesando(true);
     
-    const inventarioCheck = await verificarInventario();
-    if (!inventarioCheck.suficiente) {
-      mostrarNotificacion(`Stock insuficiente: ${inventarioCheck.faltante}. Disponible: ${inventarioCheck.disponible}, Necesario: ${inventarioCheck.necesario}`, 'error');
-      setProcesando(false);
-      return;
-    }
-    
     try {
+      // Generar número de factura
       const { data: numeroFactura } = await supabase
         .rpc('generar_numero_factura', { p_tipo: 'ticket' });
       
+      // Insertar pedido
       const { data: pedido, error: pedidoError } = await supabase
         .from('pedidos')
         .insert({
@@ -413,8 +321,8 @@ export default function POSPage() {
           total_neto: totalNeto,
           observaciones: configPedido.observaciones || null,
           medio_pago_id: parseInt(configPedido.medio_pago_id),
-          monto_pagado: pagoData.monto_pagado,
-          cambio: pagoData.cambio > 0 ? pagoData.cambio : 0,
+          monto_pagado: montoPagado,
+          cambio: montoPagado - totalNeto,
           numero_factura: numeroFactura,
           tipo_documento: 'ticket',
           cierre_id: cierreActivo?.id,
@@ -425,6 +333,7 @@ export default function POSPage() {
       
       if (pedidoError) throw pedidoError;
       
+      // Insertar detalles del pedido
       for (const item of carrito) {
         if (item.tipo === 'combo') {
           for (const comboProducto of item.combo_original?.productosSeleccionados || []) {
@@ -451,45 +360,10 @@ export default function POSPage() {
         }
       }
       
-      await actualizarInventario();
-      
-      const { data: detallesCompletos } = await supabase
-        .from('detalles_pedido')
-        .select(`
-          *,
-          productos (id, nombre, precio_venta)
-        `)
-        .eq('pedido_id', pedido.id);
-      
-      if (configImpresion.ticket) {
-        imprimirTicket(pedido, detallesCompletos, {
-          nombre_restaurante: 'RESTAURANTE',
-          direccion: '',
-          telefono: '',
-          nit: '',
-          mensaje_pie: 'Gracias por su compra'
-        });
-      }
-      
-      if (configImpresion.comanda) {
-        const productosConComanda = [];
-        for (const detalle of detallesCompletos) {
-          const imprimir = await getConfigImpresionProducto(detalle.producto_id);
-          if (imprimir) {
-            productosConComanda.push(detalle);
-          }
-        }
-        if (productosConComanda.length > 0) {
-          imprimirComanda(pedido, productosConComanda);
-        }
-      }
-      
       setPedidoCompletado({
         ...pedido,
-        cambio: pagoData.cambio > 0 ? pagoData.cambio : 0,
-        total_neto: totalNeto,
-        descuento_aplicado: descuentoAplicado,
-        subtotal_sin_iva: subtotalSinIva
+        cambio: montoPagado - totalNeto,
+        total_neto: totalNeto
       });
       setModalResumen(false);
       setTimeout(() => setModalPago(true), 100);
@@ -506,43 +380,27 @@ export default function POSPage() {
     setCarrito([]);
     setConfigPedido({
       tipo: 'mesa',
-      mesa: '',
+      mesa: '1',
       iva_id: configIva[0]?.id.toString() || '',
       medio_pago_id: mediosPago[0]?.id.toString() || '',
       descuento_valor: 0,
       descuento_porcentaje: 0,
       observaciones: ''
     });
-    setPagoData({ monto_pagado: 0, cambio: 0 });
+    setPagoData({ monto_pagado: '', cambio: 0 });
     setModalPago(false);
     setPedidoCompletado(null);
     mostrarNotificacion('Pedido completado. ¡Listo para nuevo pedido!', 'success');
   }
 
-  if (!cargandoPermisos && !tienePermiso) {
-    return (
-      <div className="min-h-[60vh] flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-10 h-10 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-          </div>
-          <h2 className="text-2xl font-bold text-[#025373] mb-2">Acceso Denegado</h2>
-          <p className="text-[#595959]">No tienes permisos para acceder al módulo POS.</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (verificandoCaja || cargando || cargandoPermisos) {
+  if (verificandoCaja || cargando) {
     return <LoadingAnimation />;
   }
 
   if (!cajaAbierta) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl overflow-hidden animate-fadeIn">
+        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl overflow-hidden">
           <div className="bg-gradient-to-r from-red-500 to-orange-500 p-6 text-center">
             <div className="w-24 h-24 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-4">
               <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -553,22 +411,15 @@ export default function POSPage() {
             <p className="text-white/80 text-sm mt-2">No se pueden realizar pedidos</p>
           </div>
           <div className="p-6 text-center">
-            <div className="bg-gray-50 rounded-xl p-6 mb-6">
-              <p className="text-gray-600 font-medium mb-2">Para comenzar a tomar pedidos, es necesario abrir la caja primero.</p>
-              <p className="text-sm text-gray-400">La caja registra todas las ventas del día y permite controlar los ingresos.</p>
-            </div>
             <button
               onClick={() => window.location.href = '/pos/caja'}
               className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 transition-all font-semibold shadow-md"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-              </svg>
               Abrir Caja
             </button>
             <button
               onClick={verificarCajaAbierta}
-              className="mt-4 text-sm text-gray-400 hover:text-gray-600 transition-colors"
+              className="mt-4 text-sm text-gray-400 hover:text-gray-600 transition-colors block w-full text-center"
             >
               ↻ Verificar estado de caja
             </button>
@@ -587,7 +438,6 @@ export default function POSPage() {
         onClose={() => setNotificacion({ show: false, message: '', type: 'success' })}
       />
 
-      {/* Header con indicador de caja abierta */}
       <header className="bg-gradient-to-r from-[#025373] to-[#116EBF] text-white p-4 shadow-lg">
         <div className="container mx-auto flex justify-between items-center">
           <div>
@@ -596,7 +446,6 @@ export default function POSPage() {
           </div>
           <div className="text-right">
             <div className="px-3 py-1 rounded-full text-sm font-medium bg-green-500 text-white inline-flex items-center gap-2">
-              <span className="w-2 h-2 bg-white rounded-full animate-pulse"></span>
               🟢 Caja Abierta
             </div>
             {cierreActivo && (
@@ -712,7 +561,7 @@ export default function POSPage() {
                   <label className="text-xs text-[#595959]">Tipo de pedido</label>
                   <select
                     value={configPedido.tipo}
-                    onChange={(e) => setConfigPedido({ ...configPedido, tipo: e.target.value, mesa: '' })}
+                    onChange={(e) => setConfigPedido({ ...configPedido, tipo: e.target.value, mesa: e.target.value === 'mesa' ? '1' : '' })}
                     className="w-full mt-1 px-3 py-1.5 border border-gray-200 rounded-lg text-sm bg-white"
                   >
                     <option value="mesa">🍽️ Mesa</option>
@@ -727,7 +576,7 @@ export default function POSPage() {
                       type="text"
                       value={configPedido.mesa}
                       onChange={(e) => setConfigPedido({ ...configPedido, mesa: e.target.value })}
-                      placeholder="Ej: 5"
+                      placeholder="Ej: 1, 2, 3"
                       className="w-full mt-1 px-3 py-1.5 border border-gray-200 rounded-lg text-sm"
                     />
                   </div>
@@ -990,8 +839,9 @@ export default function POSPage() {
                     value={pagoData.monto_pagado}
                     onChange={(e) => {
                       const monto = parseFloat(e.target.value) || 0;
-                      setPagoData({ monto_pagado: monto, cambio: monto - totalNeto });
+                      setPagoData({ monto_pagado: e.target.value, cambio: monto - totalNeto });
                     }}
+                    placeholder="0"
                     className="w-full px-3 py-2 border border-gray-200 rounded-lg text-lg font-semibold"
                   />
                 </div>
@@ -1003,11 +853,11 @@ export default function POSPage() {
                     </div>
                   </div>
                 )}
-                {pagoData.monto_pagado > 0 && pagoData.monto_pagado < totalNeto && (
+                {pagoData.monto_pagado && parseFloat(pagoData.monto_pagado) > 0 && parseFloat(pagoData.monto_pagado) < totalNeto && (
                   <div className="mt-3 p-3 bg-red-100 rounded-lg">
                     <div className="flex justify-between">
                       <span className="font-semibold text-red-700">Faltante:</span>
-                      <span className="text-xl font-bold text-red-700">${(totalNeto - pagoData.monto_pagado).toLocaleString()}</span>
+                      <span className="text-xl font-bold text-red-700">${(totalNeto - parseFloat(pagoData.monto_pagado)).toLocaleString()}</span>
                     </div>
                   </div>
                 )}
@@ -1025,7 +875,7 @@ export default function POSPage() {
               <button onClick={() => setModalResumen(false)} className="px-6 py-2.5 border border-gray-300 rounded-lg hover:bg-white">Cancelar</button>
               <button
                 onClick={finalizarPedido}
-                disabled={procesando || pagoData.monto_pagado < totalNeto}
+                disabled={procesando || !pagoData.monto_pagado || parseFloat(pagoData.monto_pagado) < totalNeto}
                 className="px-6 py-2.5 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 disabled:opacity-50 font-semibold"
               >
                 {procesando ? 'Procesando...' : '✅ Confirmar y Cobrar'}
