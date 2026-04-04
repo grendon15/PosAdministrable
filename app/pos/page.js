@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import LoadingAnimation from '@/components/LoadingAnimation';
 import NotificationToast from '@/components/NotificationToast';
+import { imprimirTicket } from '@/components/TicketPrinter';
 
 export default function POSPage() {
   const [categorias, setCategorias] = useState([]);
@@ -37,7 +38,7 @@ export default function POSPage() {
   
   const [configPedido, setConfigPedido] = useState({
     tipo: 'mesa',
-    mesa: '1',  // Mesa por defecto
+    mesa: '1',
     iva_id: '',
     medio_pago_id: '',
     descuento_valor: 0,
@@ -47,8 +48,18 @@ export default function POSPage() {
   
   const [pagoData, setPagoData] = useState({ monto_pagado: '', cambio: 0 });
 
+  // Configuración de la empresa para el ticket
+  const [configEmpresa, setConfigEmpresa] = useState({
+    nombre_restaurante: 'Mi Restaurante',
+    direccion: 'Cra 1 # 0-00',
+    telefono: '310 000 0000',
+    nit: '900.000.000-0',
+    mensaje_pie: '¡Gracias por su compra!'
+  });
+
   useEffect(() => {
     verificarCajaAbierta();
+    cargarConfigEmpresa();
   }, []);
 
   useEffect(() => {
@@ -64,6 +75,23 @@ export default function POSPage() {
   const mostrarNotificacion = (message, type = 'success') => {
     setNotificacion({ show: true, message, type });
   };
+
+  async function cargarConfigEmpresa() {
+    const { data } = await supabase
+      .from('config_empresa')
+      .select('*')
+      .maybeSingle();
+    
+    if (data) {
+      setConfigEmpresa({
+        nombre_restaurante: data.nombre || 'Mi Restaurante',
+        direccion: data.direccion || 'Cra 1 # 0-00',
+        telefono: data.telefono || '310 000 0000',
+        nit: data.nit || '900.000.000-0',
+        mensaje_pie: data.mensaje_pie || '¡Gracias por su compra!'
+      });
+    }
+  }
 
   async function verificarCajaAbierta() {
     setVerificandoCaja(true);
@@ -89,21 +117,18 @@ export default function POSPage() {
   async function cargarDatos() {
     setCargando(true);
     
-    // Cargar categorías
     const { data: categoriasData } = await supabase
       .from('categorias')
       .select('*')
       .eq('activo', true)
       .order('nombre');
     
-    // Cargar productos activos
     const { data: productosData } = await supabase
       .from('productos')
       .select('*, categorias(*)')
       .eq('activo', true)
       .order('nombre');
     
-    // Cargar combos activos
     const { data: combosData } = await supabase
       .from('combos')
       .select(`
@@ -116,13 +141,11 @@ export default function POSPage() {
       .eq('activo', true)
       .order('nombre');
     
-    // Cargar configuración de IVA
     const { data: ivaData } = await supabase
       .from('config_iva')
       .select('*')
       .eq('activo', true);
     
-    // Cargar medios de pago
     const { data: mediosData } = await supabase
       .from('medios_pago')
       .select('*')
@@ -134,7 +157,6 @@ export default function POSPage() {
     setConfigIva(ivaData || []);
     setMediosPago(mediosData || []);
     
-    // Seleccionar valores por defecto
     if (ivaData && ivaData.length > 0 && !configPedido.iva_id) {
       setConfigPedido(prev => ({ ...prev, iva_id: ivaData[0].id.toString() }));
     }
@@ -157,7 +179,6 @@ export default function POSPage() {
     setProductosFiltrados(filtrados);
   }
 
-  // Funciones del carrito
   function agregarProductoAlCarrito(producto) {
     const itemExistente = carrito.find(i => i.id === producto.id && i.tipo !== 'combo');
     if (itemExistente) {
@@ -180,13 +201,12 @@ export default function POSPage() {
   }
 
   function actualizarCantidad(id, nuevaCantidad, tipo = 'producto') {
-    const itemId = tipo === 'combo' ? id : id;
     if (nuevaCantidad <= 0) {
-      eliminarDelCarrito(itemId);
+      eliminarDelCarrito(id);
       return;
     }
     setCarrito(carrito.map(item =>
-      item.id === itemId
+      item.id === id
         ? { ...item, cantidad: nuevaCantidad, subtotal: nuevaCantidad * item.precio_venta }
         : item
     ));
@@ -204,7 +224,6 @@ export default function POSPage() {
     }
   }
 
-  // Funciones de combos
   function abrirSelectorCombo(combo) {
     const productosIniciales = combo.combo_productos.map(cp => ({
       id: cp.producto_id,
@@ -246,7 +265,6 @@ export default function POSPage() {
     mostrarNotificacion(`Combo "${modalCombo.combo.nombre}" agregado al pedido`, 'success');
   }
 
-  // Cálculos de totales
   const totalProductos = carrito.reduce((sum, item) => sum + item.subtotal, 0);
   const ivaSeleccionado = configIva.find(i => i.id === parseInt(configPedido.iva_id));
   const porcentajeIva = ivaSeleccionado?.porcentaje || 0;
@@ -303,11 +321,9 @@ export default function POSPage() {
     setProcesando(true);
     
     try {
-      // Generar número de factura
       const { data: numeroFactura } = await supabase
         .rpc('generar_numero_factura', { p_tipo: 'ticket' });
       
-      // Insertar pedido
       const { data: pedido, error: pedidoError } = await supabase
         .from('pedidos')
         .insert({
@@ -333,7 +349,6 @@ export default function POSPage() {
       
       if (pedidoError) throw pedidoError;
       
-      // Insertar detalles del pedido
       for (const item of carrito) {
         if (item.tipo === 'combo') {
           for (const comboProducto of item.combo_original?.productosSeleccionados || []) {
@@ -360,11 +375,32 @@ export default function POSPage() {
         }
       }
       
-      setPedidoCompletado({
+      const { data: detallesCompletos } = await supabase
+        .from('detalles_pedido')
+        .select(`
+          *,
+          productos (nombre)
+        `)
+        .eq('pedido_id', pedido.id);
+      
+      const medioPagoSeleccionado = mediosPago.find(mp => mp.id === parseInt(configPedido.medio_pago_id));
+      
+      const pedidoCompleto = {
         ...pedido,
+        detalles: detallesCompletos.map(d => ({
+          cantidad: d.cantidad,
+          producto_nombre: d.productos?.nombre,
+          precio_unitario: d.precio_unitario,
+          subtotal: d.subtotal
+        })),
+        medio_pago_nombre: medioPagoSeleccionado?.nombre || 'Efectivo',
         cambio: montoPagado - totalNeto,
-        total_neto: totalNeto
-      });
+        tipo_documento: 'ticket'
+      };
+      
+      imprimirTicket(pedidoCompleto, configEmpresa);
+      
+      setPedidoCompletado(pedidoCompleto);
       setModalResumen(false);
       setTimeout(() => setModalPago(true), 100);
       
@@ -459,7 +495,6 @@ export default function POSPage() {
 
       <div className="flex-1 container mx-auto p-4 overflow-hidden">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
-          {/* Panel izquierdo - Productos */}
           <div className="lg:col-span-2 flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden">
             <div className="p-4 border-b border-gray-100 space-y-3">
               <div className="relative">
@@ -543,7 +578,6 @@ export default function POSPage() {
             </div>
           </div>
 
-          {/* Panel derecho - Pedido Actual */}
           <div className="bg-white rounded-xl shadow-sm flex flex-col h-full overflow-hidden">
             <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-[#F2F2F2] to-white">
               <h2 className="text-lg font-bold text-[#025373] flex items-center gap-2">
@@ -612,12 +646,12 @@ export default function POSPage() {
                     </div>
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => actualizarCantidad(item.tipo === 'combo' ? item.id : item.id, item.cantidad - 1, item.tipo)}
+                        onClick={() => actualizarCantidad(item.id, item.cantidad - 1, item.tipo)}
                         className="w-7 h-7 rounded-full bg-white border border-gray-200 text-[#116EBF] hover:bg-[#116EBF] hover:text-white transition-colors"
                       >-</button>
                       <span className="w-8 text-center font-semibold">{item.cantidad}</span>
                       <button
-                        onClick={() => actualizarCantidad(item.tipo === 'combo' ? item.id : item.id, item.cantidad + 1, item.tipo)}
+                        onClick={() => actualizarCantidad(item.id, item.cantidad + 1, item.tipo)}
                         className="w-7 h-7 rounded-full bg-white border border-gray-200 text-[#116EBF] hover:bg-[#116EBF] hover:text-white transition-colors"
                       >+</button>
                       <button onClick={() => eliminarDelCarrito(item.id)} className="ml-1 p-1 text-red-500 hover:bg-red-50 rounded-lg">
@@ -922,11 +956,6 @@ export default function POSPage() {
       )}
 
       <style jsx>{`
-        @keyframes slide-in-right {
-          from { transform: translateX(100%); opacity: 0; }
-          to { transform: translateX(0); opacity: 1; }
-        }
-        .animate-slide-in-right { animation: slide-in-right 0.3s ease-out; }
         @keyframes fadeIn {
           from { opacity: 0; transform: scale(0.95); }
           to { opacity: 1; transform: scale(1); }

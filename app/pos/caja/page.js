@@ -5,37 +5,51 @@ import LoadingAnimation from '@/components/LoadingAnimation';
 import NotificationToast from '@/components/NotificationToast';
 import { usePermissions } from '@/hooks/usePermissions';
 import { useRouter } from 'next/navigation';
+import { generarPDFCierre } from '@/components/ReporteCierre';
+import ModalCierreProfesional from '@/components/ModalCierreProfesional';
 
 export default function CajaPOSPage() {
   const [cargando, setCargando] = useState(true);
   const [notificacion, setNotificacion] = useState({ show: false, message: '', type: 'success' });
   const router = useRouter();
   
-  // Permisos
   const { puedeVer, puedeEditar, cargando: cargandoPermisos } = usePermissions();
   const tienePermiso = puedeVer('caja');
   const puedeEditarCaja = puedeEditar('caja');
   
-  // Datos
   const [configCaja, setConfigCaja] = useState({ fondo_inicial: 500000 });
   const [ventasPeriodo, setVentasPeriodo] = useState({
     efectivo: 0,
     tarjeta: 0,
     transferencia: 0,
-    total: 0
+    total: 0,
+    subtotal_sin_iva: 0,
+    impuesto_total: 0
   });
   const [cierreActual, setCierreActual] = useState(null);
   const [movimientos, setMovimientos] = useState([]);
   const [cajaAbierta, setCajaAbierta] = useState(false);
+  const [pedidosPendientes, setPedidosPendientes] = useState([]);
   
-  // Estados para formularios
   const [fondoApertura, setFondoApertura] = useState('');
   const [efectivoContado, setEfectivoContado] = useState('');
   const [observaciones, setObservaciones] = useState('');
   
-  // Modales
   const [modalApertura, setModalApertura] = useState({ open: false });
   const [modalMovimiento, setModalMovimiento] = useState({ open: false, tipo: '', concepto: '', monto: '' });
+  const [modalCierreProfesional, setModalCierreProfesional] = useState({ open: false });
+
+  // Configuración de la empresa
+  const [configEmpresa, setConfigEmpresa] = useState({
+    nombre: 'Mi Restaurante',
+    nit: '900.000.000-0',
+    telefono: '310 000 0000',
+    direccion: 'Cra 1 # 0-00'
+  });
+
+  useEffect(() => {
+    cargarConfigEmpresa();
+  }, []);
 
   useEffect(() => {
     if (tienePermiso) {
@@ -44,6 +58,7 @@ export default function CajaPOSPage() {
         if (cajaAbierta) {
           cargarVentasPeriodo();
           cargarMovimientos();
+          cargarPedidosPendientes(cierreActual?.id);
         }
       }, 30000);
       return () => clearInterval(interval);
@@ -55,6 +70,14 @@ export default function CajaPOSPage() {
   useEffect(() => {
     if (cierreActual) {
       setCajaAbierta(!cierreActual.cerrado);
+      // Guardar en localStorage para que layout.js detecte el cambio
+      if (!cierreActual.cerrado) {
+        localStorage.setItem('cajaAbierta', 'true');
+      } else {
+        localStorage.setItem('cajaAbierta', 'false');
+      }
+      // Disparar evento para actualizar layout
+      window.dispatchEvent(new Event('storage'));
     }
   }, [cierreActual]);
 
@@ -62,10 +85,25 @@ export default function CajaPOSPage() {
     setNotificacion({ show: true, message, type });
   };
 
+  async function cargarConfigEmpresa() {
+    const { data } = await supabase
+      .from('config_empresa')
+      .select('*')
+      .maybeSingle();
+    
+    if (data) {
+      setConfigEmpresa({
+        nombre: data.nombre || 'Mi Restaurante',
+        nit: data.nit || '900.000.000-0',
+        telefono: data.telefono || '310 000 0000',
+        direccion: data.direccion || 'Cra 1 # 0-00'
+      });
+    }
+  }
+
   async function cargarDatos() {
     setCargando(true);
     
-    // Cargar configuración de caja
     const { data: configData } = await supabase
       .from('config_caja')
       .select('*')
@@ -98,11 +136,25 @@ export default function CajaPOSPage() {
       setCierreActual(data[0]);
       if (!data[0].cerrado) {
         await cargarMovimientos(data[0].id);
+        await cargarPedidosPendientes(data[0].id);
       }
     } else {
       setCierreActual(null);
       setCajaAbierta(false);
     }
+  }
+
+  async function cargarPedidosPendientes(cierreId) {
+    if (!cierreId) return;
+    
+    const { data } = await supabase
+      .from('pedidos')
+      .select('*')
+      .eq('cierre_id', cierreId)
+      .in('estado', ['pendiente', 'en_preparacion'])
+      .order('created_at', { ascending: false });
+    
+    setPedidosPendientes(data || []);
   }
 
   async function cargarMovimientos(cierreId = null) {
@@ -120,7 +172,7 @@ export default function CajaPOSPage() {
 
   async function cargarVentasPeriodo() {
     if (!cierreActual) {
-      setVentasPeriodo({ efectivo: 0, tarjeta: 0, transferencia: 0, total: 0 });
+      setVentasPeriodo({ efectivo: 0, tarjeta: 0, transferencia: 0, total: 0, subtotal_sin_iva: 0, impuesto_total: 0 });
       return;
     }
     
@@ -137,10 +189,13 @@ export default function CajaPOSPage() {
     let tarjeta = 0;
     let transferencia = 0;
     let total = 0;
+    let subtotalSinIva = 0;
+    let impuestoTotal = 0;
     
     pedidos?.forEach(pedido => {
       const medio = pedido.medio_pago?.nombre?.toLowerCase() || '';
       const monto = pedido.total_neto || 0;
+      const impuesto = pedido.impuesto || 0;
       
       if (medio.includes('efectivo')) {
         efectivo += monto;
@@ -152,9 +207,11 @@ export default function CajaPOSPage() {
         efectivo += monto;
       }
       total += monto;
+      subtotalSinIva += (monto - impuesto);
+      impuestoTotal += impuesto;
     });
     
-    setVentasPeriodo({ efectivo, tarjeta, transferencia, total });
+    setVentasPeriodo({ efectivo, tarjeta, transferencia, total, subtotal_sin_iva: subtotalSinIva, impuesto_total: impuestoTotal });
   }
 
   async function registrarMovimiento() {
@@ -201,15 +258,26 @@ export default function CajaPOSPage() {
   }
 
   async function abrirCaja() {
-    console.log('abrirCaja - Inicio');
-    
     if (!puedeEditarCaja) {
       mostrarNotificacion('No tienes permisos para abrir caja', 'error');
       return;
     }
     
+    // VALIDACIÓN: Verificar si ya hay una caja abierta hoy
+    const fecha = new Date().toISOString().split('T')[0];
+    const { data: cajaExistente } = await supabase
+      .from('cierres_caja')
+      .select('id, cerrado')
+      .eq('fecha', fecha)
+      .eq('cerrado', false)
+      .maybeSingle();
+    
+    if (cajaExistente) {
+      mostrarNotificacion('❌ Ya hay una caja abierta para el día de hoy. No se puede abrir otra.', 'error');
+      return;
+    }
+    
     const fondo = parseFloat(fondoApertura);
-    console.log('Fondo a aperturar:', fondo);
     
     if (!fondoApertura || fondo <= 0) {
       mostrarNotificacion('Ingresa un fondo inicial válido', 'error');
@@ -217,9 +285,6 @@ export default function CajaPOSPage() {
     }
     
     try {
-      const fecha = new Date().toISOString().split('T')[0];
-      console.log('Fecha:', fecha);
-      
       const { data, error } = await supabase
         .from('cierres_caja')
         .insert({
@@ -230,13 +295,15 @@ export default function CajaPOSPage() {
         })
         .select();
       
-      console.log('Respuesta Supabase:', { data, error });
-      
       if (error) throw error;
       
       mostrarNotificacion(`✅ Caja abierta con fondo inicial: $${fondo.toLocaleString()}`, 'success');
       setModalApertura({ open: false });
       await cargarDatos();
+      
+      // Forzar recarga de layout para mostrar botón POS
+      localStorage.setItem('cajaAbierta', 'true');
+      window.dispatchEvent(new Event('storage'));
       
     } catch (error) {
       console.error('Error:', error);
@@ -244,73 +311,61 @@ export default function CajaPOSPage() {
     }
   }
 
-  async function cerrarCaja() {
-    console.log('cerrarCaja - Inicio');
-    
+  async function cerrarCajaProfesional({ efectivoContado: efectivoContadoNum, observaciones: obs }) {
     if (!puedeEditarCaja) {
       mostrarNotificacion('No tienes permisos para cerrar caja', 'error');
       return;
     }
     
-    if (!efectivoContado || parseFloat(efectivoContado) < 0) {
-      mostrarNotificacion('Ingresa el efectivo contado', 'error');
-      return;
-    }
-    
-    const efectivoContadoNum = parseFloat(efectivoContado);
     const totalIngresos = movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0);
     const totalEgresos = movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0);
-    const efectivoEsperado = cierreActual.apertura + ventasPeriodo.efectivo + totalIngresos - totalEgresos;
-    const diferencia = efectivoContadoNum - efectivoEsperado;
-    
-    console.log('Datos cierre:', { efectivoContadoNum, efectivoEsperado, diferencia });
-    
-    const confirmar = confirm(
-      `📊 Resumen de Cierre\n\n` +
-      `Fondo inicial: $${cierreActual.apertura?.toLocaleString()}\n` +
-      `Ventas en efectivo: $${ventasPeriodo.efectivo.toLocaleString()}\n` +
-      `Ingresos adicionales: $${totalIngresos.toLocaleString()}\n` +
-      `Egresos: $${totalEgresos.toLocaleString()}\n` +
-      `─────────────────────────\n` +
-      `Efectivo esperado: $${efectivoEsperado.toLocaleString()}\n` +
-      `Efectivo contado: $${efectivoContadoNum.toLocaleString()}\n` +
-      `─────────────────────────\n` +
-      `Diferencia: ${diferencia >= 0 ? '+' : ''}$${diferencia.toLocaleString()}\n\n` +
-      `¿Confirmar cierre de caja?`
-    );
-    
-    if (!confirmar) return;
+    const efectivoEsperadoVal = cierreActual.apertura + ventasPeriodo.efectivo + totalIngresos - totalEgresos;
+    const diferencia = efectivoContadoNum - efectivoEsperadoVal;
     
     try {
-      const { error } = await supabase
+      await supabase
         .from('cierres_caja')
         .update({
           ventas_efectivo: ventasPeriodo.efectivo,
           ventas_tarjeta: ventasPeriodo.tarjeta,
           ventas_transferencia: ventasPeriodo.transferencia,
           ventas_total: ventasPeriodo.total,
+          subtotal_sin_iva: ventasPeriodo.subtotal_sin_iva,
+          impuesto_total: ventasPeriodo.impuesto_total,
           efectivo_contado: efectivoContadoNum,
           diferencia: diferencia,
-          observaciones: observaciones,
+          observaciones: obs,
           cerrado: true,
           cerrado_at: new Date().toISOString()
         })
         .eq('id', cierreActual.id);
       
-      if (error) throw error;
+      const datosCierre = {
+        cierre: { ...cierreActual, cerrado_at: new Date().toISOString(), efectivo_contado: efectivoContadoNum, diferencia, observaciones: obs },
+        ventasPeriodo,
+        movimientos,
+        pedidosPendientes,
+        empresaData: configEmpresa
+      };
+      
+      await generarPDFCierre(datosCierre);
       
       mostrarNotificacion(
-        `✅ Cierre de caja completado\nDiferencia: ${diferencia >= 0 ? '+' : ''}$${diferencia.toLocaleString()}`,
+        `✅ Cierre de caja completado\nDiferencia: ${diferencia >= 0 ? '+' : ''}$${diferencia.toLocaleString()}\nSe ha generado el PDF de cierre.`,
         diferencia === 0 ? 'success' : diferencia > 0 ? 'warning' : 'error'
       );
       
+      setModalCierreProfesional({ open: false });
       setEfectivoContado('');
       setObservaciones('');
       await cargarDatos();
       
-      // Redirigir al POS para que el usuario vea que la caja está cerrada
+      // Forzar recarga de layout para ocultar botón POS
+      localStorage.setItem('cajaAbierta', 'false');
+      window.dispatchEvent(new Event('storage'));
+      
       setTimeout(() => {
-        router.push('/pos');
+        window.location.href = '/pos';
       }, 2000);
       
     } catch (error) {
@@ -355,7 +410,6 @@ export default function CajaPOSPage() {
         onClose={() => setNotificacion({ show: false, message: '', type: 'success' })}
       />
 
-      {/* Header */}
       <header className="bg-gradient-to-r from-[#025373] to-[#116EBF] text-white p-4 shadow-lg">
         <div className="container mx-auto flex justify-between items-center">
           <div>
@@ -370,7 +424,6 @@ export default function CajaPOSPage() {
       </header>
 
       <div className="container mx-auto p-4 max-w-4xl">
-        {/* Estado de la caja */}
         <div className={`rounded-xl shadow-sm p-6 mb-6 ${cajaAbierta ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200'}`}>
           <div className="flex justify-between items-center">
             <div>
@@ -395,7 +448,6 @@ export default function CajaPOSPage() {
           </div>
         </div>
 
-        {/* Botones de acción */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
           {!cajaAbierta ? (
             <button
@@ -422,30 +474,38 @@ export default function CajaPOSPage() {
           )}
         </div>
 
-        {/* Caja Abierta - Contenido */}
         {cajaAbierta && (
           <>
-            {/* Ventas del periodo */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-              <div className="bg-white rounded-xl shadow-sm p-4 text-center">
-                <p className="text-sm text-[#595959]">Efectivo</p>
-                <p className="text-xl font-bold text-[#116EBF]">${ventasPeriodo.efectivo.toLocaleString()}</p>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm p-4 text-center">
-                <p className="text-sm text-[#595959]">Tarjeta</p>
-                <p className="text-xl font-bold text-[#116EBF]">${ventasPeriodo.tarjeta.toLocaleString()}</p>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm p-4 text-center">
-                <p className="text-sm text-[#595959]">Transferencia</p>
-                <p className="text-xl font-bold text-[#116EBF]">${ventasPeriodo.transferencia.toLocaleString()}</p>
-              </div>
-              <div className="bg-white rounded-xl shadow-sm p-4 text-center bg-[#116EBF]/5">
-                <p className="text-sm text-[#595959]">Total Ventas</p>
-                <p className="text-xl font-bold text-[#116EBF]">${ventasPeriodo.total.toLocaleString()}</p>
+            <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
+              <h2 className="text-lg font-semibold text-[#025373] mb-4">📊 Ventas del período</h2>
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <div className="bg-[#F2F2F2] rounded-lg p-3 text-center">
+                  <p className="text-sm text-[#595959]">Efectivo</p>
+                  <p className="text-xl font-bold text-[#116EBF]">${ventasPeriodo.efectivo.toLocaleString()}</p>
+                </div>
+                <div className="bg-[#F2F2F2] rounded-lg p-3 text-center">
+                  <p className="text-sm text-[#595959]">Tarjeta</p>
+                  <p className="text-xl font-bold text-[#116EBF]">${ventasPeriodo.tarjeta.toLocaleString()}</p>
+                </div>
+                <div className="bg-[#F2F2F2] rounded-lg p-3 text-center">
+                  <p className="text-sm text-[#595959]">Transferencia</p>
+                  <p className="text-xl font-bold text-[#116EBF]">${ventasPeriodo.transferencia.toLocaleString()}</p>
+                </div>
+                <div className="bg-[#116EBF]/5 rounded-lg p-3 text-center">
+                  <p className="text-sm text-[#595959]">Subtotal sin IVA</p>
+                  <p className="text-lg font-bold text-[#025373]">${ventasPeriodo.subtotal_sin_iva.toLocaleString()}</p>
+                </div>
+                <div className="bg-[#116EBF]/5 rounded-lg p-3 text-center">
+                  <p className="text-sm text-[#595959]">Impuesto total</p>
+                  <p className="text-lg font-bold text-[#025373]">${ventasPeriodo.impuesto_total.toLocaleString()}</p>
+                </div>
+                <div className="bg-[#116EBF]/10 rounded-lg p-3 text-center">
+                  <p className="text-sm text-[#595959] font-semibold">TOTAL VENTAS</p>
+                  <p className="text-2xl font-bold text-[#116EBF]">${ventasPeriodo.total.toLocaleString()}</p>
+                </div>
               </div>
             </div>
 
-            {/* Movimientos de caja */}
             <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
               <h2 className="text-lg font-semibold text-[#025373] mb-4">💰 Movimientos de Caja</h2>
               
@@ -468,82 +528,30 @@ export default function CajaPOSPage() {
               )}
             </div>
 
-            {/* Cierre de caja */}
+            {pedidosPendientes.length > 0 && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
+                <div className="flex items-start gap-3">
+                  <div className="text-red-500 text-xl">⚠️</div>
+                  <div>
+                    <h3 className="font-bold text-red-700">Pedidos pendientes de pago</h3>
+                    <p className="text-sm text-red-600">
+                      Hay {pedidosPendientes.length} pedido(s) sin pagar. No se puede cerrar la caja hasta que estén pagados.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="text-lg font-semibold text-[#025373] mb-4">🔒 Cierre de Caja</h2>
               
-              <div className="space-y-4">
-                <div className="bg-[#F2F2F2] rounded-lg p-4">
-                  <div className="flex justify-between mb-2">
-                    <span className="text-[#595959]">Fondo inicial:</span>
-                    <span className="font-semibold">${cierreActual?.apertura?.toLocaleString()}</span>
-                  </div>
-                  <div className="flex justify-between mb-2">
-                    <span className="text-[#595959]">Ventas en efectivo:</span>
-                    <span className="font-semibold">+${ventasPeriodo.efectivo.toLocaleString()}</span>
-                  </div>
-                  {movimientos.filter(m => m.tipo === 'ingreso').length > 0 && (
-                    <div className="flex justify-between mb-2 text-green-600">
-                      <span>Ingresos adicionales:</span>
-                      <span>+${movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0).toLocaleString()}</span>
-                    </div>
-                  )}
-                  {movimientos.filter(m => m.tipo === 'egreso').length > 0 && (
-                    <div className="flex justify-between mb-2 text-red-500">
-                      <span>Egresos:</span>
-                      <span>-${movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0).toLocaleString()}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between pt-2 mt-2 border-t border-gray-300">
-                    <span className="font-bold text-[#025373]">Efectivo esperado:</span>
-                    <span className="text-xl font-bold text-[#116EBF]">${efectivoEsperado().toLocaleString()}</span>
-                  </div>
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-[#595959] mb-1">Efectivo contado *</label>
-                  <div className="relative">
-                    <span className="absolute left-3 top-2.5 text-[#595959]">$</span>
-                    <input
-                      type="number"
-                      value={efectivoContado}
-                      onChange={(e) => setEfectivoContado(e.target.value)}
-                      placeholder="0.00"
-                      className="w-full pl-8 pr-4 py-2.5 border border-gray-200 rounded-lg focus:outline-none focus:border-[#3BD9D9]"
-                    />
-                  </div>
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-[#595959] mb-1">Observaciones</label>
-                  <textarea
-                    value={observaciones}
-                    onChange={(e) => setObservaciones(e.target.value)}
-                    placeholder="Notas sobre el cierre..."
-                    rows="2"
-                    className="w-full px-4 py-2.5 border border-gray-200 rounded-lg focus:outline-none focus:border-[#3BD9D9] resize-none"
-                  />
-                </div>
-                
-                {efectivoContado && (
-                  <div className={`rounded-lg p-3 ${parseFloat(efectivoContado) === efectivoEsperado() ? 'bg-green-50 border border-green-200' : parseFloat(efectivoContado) > efectivoEsperado() ? 'bg-yellow-50 border border-yellow-200' : 'bg-red-50 border border-red-200'}`}>
-                    <div className="flex justify-between items-center">
-                      <span className="text-[#595959]">Diferencia:</span>
-                      <span className={`text-xl font-bold ${parseFloat(efectivoContado) === efectivoEsperado() ? 'text-green-600' : parseFloat(efectivoContado) > efectivoEsperado() ? 'text-yellow-600' : 'text-red-600'}`}>
-                        {parseFloat(efectivoContado) >= efectivoEsperado() ? '+' : ''}{(parseFloat(efectivoContado) - efectivoEsperado()).toLocaleString()}
-                      </span>
-                    </div>
-                  </div>
-                )}
-                
-                <button
-                  onClick={cerrarCaja}
-                  disabled={!efectivoContado}
-                  className="w-full py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:from-orange-600 hover:to-red-600 transition-all font-semibold shadow-md disabled:opacity-50"
-                >
-                  🔒 Cerrar Caja
-                </button>
-              </div>
+              <button
+                onClick={() => setModalCierreProfesional({ open: true })}
+                disabled={pedidosPendientes.length > 0}
+                className="w-full py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:from-orange-600 hover:to-red-600 transition-all font-semibold shadow-md disabled:opacity-50"
+              >
+                🔒 Cerrar Caja
+              </button>
             </div>
           </>
         )}
@@ -633,12 +641,22 @@ export default function CajaPOSPage() {
         </div>
       )}
 
+      {/* MODAL CIERRE PROFESIONAL */}
+      <ModalCierreProfesional
+        isOpen={modalCierreProfesional.open}
+        onClose={() => setModalCierreProfesional({ open: false })}
+        onConfirm={cerrarCajaProfesional}
+        data={{
+          cierreActual,
+          ventasPeriodo,
+          movimientos,
+          efectivoEsperado,
+          efectivoContado,
+          observaciones
+        }}
+      />
+
       <style jsx>{`
-        @keyframes slide-in-right {
-          from { transform: translateX(100%); opacity: 0; }
-          to { transform: translateX(0); opacity: 1; }
-        }
-        .animate-slide-in-right { animation: slide-in-right 0.3s ease-out; }
         @keyframes fadeIn {
           from { opacity: 0; transform: scale(0.95); }
           to { opacity: 1; transform: scale(1); }

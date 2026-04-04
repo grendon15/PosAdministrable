@@ -8,11 +8,31 @@ import LoadingAnimation from '@/components/LoadingAnimation';
 export default function POSLayout({ children }) {
   const [cargando, setCargando] = useState(true);
   const [user, setUser] = useState(null);
+  const [cajaAbierta, setCajaAbierta] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
 
   useEffect(() => {
     verificarSesion();
+    
+    // Escuchar cambios en el almacenamiento local (cuando se abre/cierra caja)
+    const handleStorageChange = () => {
+      verificarCajaAbierta();
+    };
+    
+    window.addEventListener('storage', handleStorageChange);
+    
+    // También verificar cada 5 segundos si hay cambios
+    const interval = setInterval(() => {
+      if (!cargando) {
+        verificarCajaAbierta();
+      }
+    }, 5000);
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      clearInterval(interval);
+    };
   }, []);
 
   async function verificarSesion() {
@@ -24,7 +44,27 @@ export default function POSLayout({ children }) {
     }
     
     setUser(session.user);
+    await verificarCajaAbierta();
     setCargando(false);
+  }
+
+  async function verificarCajaAbierta() {
+    const fecha = new Date().toISOString().split('T')[0];
+    const { data } = await supabase
+      .from('cierres_caja')
+      .select('cerrado')
+      .eq('fecha', fecha)
+      .eq('cerrado', false)
+      .maybeSingle();
+    
+    const nuevaCajaAbierta = !!data;
+    if (nuevaCajaAbierta !== cajaAbierta) {
+      setCajaAbierta(nuevaCajaAbierta);
+      // Forzar recarga de la página si es necesario
+      if (pathname === '/pos' && !nuevaCajaAbierta) {
+        router.refresh();
+      }
+    }
   }
 
   async function cerrarSesion() {
@@ -41,10 +81,13 @@ export default function POSLayout({ children }) {
       <header className="bg-gradient-to-r from-[#025373] to-[#116EBF] text-white p-4 shadow-lg">
         <div className="container mx-auto flex justify-between items-center">
           <div className="flex gap-6">
-            <Link href="/pos" className={`font-medium ${pathname === '/pos' ? 'border-b-2 border-white' : 'text-white/80'}`}>
-              🍽️ POS
-            </Link>
-            <Link href="/pos/caja" className={`font-medium ${pathname === '/pos/caja' ? 'border-b-2 border-white' : 'text-white/80'}`}>
+            {/* Solo mostrar botón POS si la caja está abierta */}
+            {cajaAbierta && (
+              <Link href="/pos" className={`font-medium ${pathname === '/pos' ? 'border-b-2 border-white' : 'text-white/80 hover:text-white transition-colors'}`}>
+                🍽️ POS
+              </Link>
+            )}
+            <Link href="/pos/caja" className={`font-medium ${pathname === '/pos/caja' ? 'border-b-2 border-white' : 'text-white/80 hover:text-white transition-colors'}`}>
               💰 Caja
             </Link>
           </div>
