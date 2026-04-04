@@ -15,14 +15,12 @@ export default function POSLayout({ children }) {
   useEffect(() => {
     verificarSesion();
     
-    // Escuchar cambios en el almacenamiento local (cuando se abre/cierra caja)
     const handleStorageChange = () => {
       verificarCajaAbierta();
     };
     
     window.addEventListener('storage', handleStorageChange);
     
-    // También verificar cada 5 segundos si hay cambios
     const interval = setInterval(() => {
       if (!cargando) {
         verificarCajaAbierta();
@@ -58,11 +56,13 @@ export default function POSLayout({ children }) {
       .maybeSingle();
     
     const nuevaCajaAbierta = !!data;
+    
     if (nuevaCajaAbierta !== cajaAbierta) {
       setCajaAbierta(nuevaCajaAbierta);
-      // Forzar recarga de la página si es necesario
-      if (pathname === '/pos' && !nuevaCajaAbierta) {
-        router.refresh();
+      
+      // Si la caja está cerrada y estamos en /pos, redirigir a /pos/caja
+      if (!nuevaCajaAbierta && pathname === '/pos') {
+        router.push('/pos/caja');
       }
     }
   }

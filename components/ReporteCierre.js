@@ -1,6 +1,5 @@
 'use client';
 import jsPDF from 'jspdf';
-import 'jspdf-autotable';
 
 export const generarPDFCierre = async (data) => {
   const {
@@ -12,6 +11,7 @@ export const generarPDFCierre = async (data) => {
   } = data;
 
   const doc = new jsPDF();
+  
   const empresa = {
     nombre: empresaData.nombre || "Mi Restaurante",
     nit: empresaData.nit || "900.000.000-0",
@@ -19,118 +19,120 @@ export const generarPDFCierre = async (data) => {
     direccion: empresaData.direccion || "Cra 1 # 0-00"
   };
 
+  let y = 20;
+
   // Título
   doc.setFontSize(18);
-  doc.text(empresa.nombre, 105, 20, { align: 'center' });
+  doc.text(empresa.nombre, 105, y, { align: 'center' });
+  y += 8;
   doc.setFontSize(10);
-  doc.text(`NIT: ${empresa.nit}`, 105, 28, { align: 'center' });
-  doc.text(`Tel: ${empresa.telefono} | ${empresa.direccion}`, 105, 34, { align: 'center' });
+  doc.text(`NIT: ${empresa.nit}`, 105, y, { align: 'center' });
+  y += 6;
+  doc.text(`Tel: ${empresa.telefono} | ${empresa.direccion}`, 105, y, { align: 'center' });
+  y += 10;
   
   doc.setFontSize(14);
-  doc.text('REPORTE DE CIERRE DE CAJA', 105, 45, { align: 'center' });
+  doc.text('REPORTE DE CIERRE DE CAJA', 105, y, { align: 'center' });
+  y += 10;
   
   doc.setFontSize(10);
-  doc.text(`Fecha: ${new Date(cierre.fecha).toLocaleDateString('es-CO')}`, 20, 55);
-  doc.text(`Hora apertura: ${new Date(cierre.created_at).toLocaleTimeString()}`, 20, 61);
-  doc.text(`Hora cierre: ${new Date(cierre.cerrado_at).toLocaleTimeString()}`, 20, 67);
-  doc.text(`Cajero: ${cierre.usuario_nombre || 'Administrador'}`, 20, 73);
+  doc.text(`Fecha: ${new Date(cierre.fecha).toLocaleDateString('es-CO')}`, 20, y);
+  y += 6;
+  doc.text(`Hora apertura: ${new Date(cierre.created_at).toLocaleTimeString()}`, 20, y);
+  y += 6;
+  doc.text(`Hora cierre: ${new Date(cierre.cerrado_at).toLocaleTimeString()}`, 20, y);
+  y += 6;
+  doc.text(`Cajero: ${cierre.usuario_nombre || 'Administrador'}`, 20, y);
+  y += 15;
 
-  // Resumen de ventas
+  // Ventas
   doc.setFontSize(12);
-  doc.text('VENTAS DEL PERÍODO', 20, 85);
+  doc.text('VENTAS DEL PERÍODO', 20, y);
+  y += 8;
   
-  doc.autoTable({
-    startY: 90,
-    head: [['Medio de pago', 'Monto']],
-    body: [
-      ['Efectivo', `$${ventasPeriodo.efectivo.toLocaleString()}`],
-      ['Tarjeta', `$${ventasPeriodo.tarjeta.toLocaleString()}`],
-      ['Transferencia', `$${ventasPeriodo.transferencia.toLocaleString()}`],
-      ['TOTAL VENTAS', `$${ventasPeriodo.total.toLocaleString()}`]
-    ],
-    theme: 'striped',
-    styles: { fontSize: 10 },
-    headStyles: { fillColor: [2, 83, 115] }
+  const ventasData = [
+    ['Efectivo:', `$${(ventasPeriodo.efectivo || 0).toLocaleString()}`],
+    ['Tarjeta:', `$${(ventasPeriodo.tarjeta || 0).toLocaleString()}`],
+    ['Transferencia:', `$${(ventasPeriodo.transferencia || 0).toLocaleString()}`],
+    ['TOTAL VENTAS:', `$${(ventasPeriodo.total || 0).toLocaleString()}`],
+    ['Subtotal sin IVA:', `$${(ventasPeriodo.subtotal_sin_iva || 0).toLocaleString()}`],
+    ['Impuesto total:', `$${(ventasPeriodo.impuesto_total || 0).toLocaleString()}`]
+  ];
+  
+  ventasData.forEach(row => {
+    doc.text(row[0], 25, y);
+    doc.text(row[1], 120, y);
+    y += 6;
   });
+  y += 5;
 
-  let y = doc.lastAutoTable.finalY + 10;
-
-  // Movimientos de caja
-  if (movimientos.length > 0) {
+  // Movimientos
+  if (movimientos && movimientos.length > 0) {
     doc.text('MOVIMIENTOS DE CAJA', 20, y);
+    y += 8;
+    
     const ingresos = movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0);
     const egresos = movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0);
     
-    doc.autoTable({
-      startY: y + 5,
-      head: [['Concepto', 'Tipo', 'Monto']],
-      body: movimientos.map(m => [m.concepto, m.tipo === 'ingreso' ? 'Ingreso' : 'Egreso', `$${m.monto.toLocaleString()}`]),
-      foot: [['', 'Total Ingresos:', `+$${ingresos.toLocaleString()}`], ['', 'Total Egresos:', `-$${egresos.toLocaleString()}`]],
-      theme: 'striped',
-      styles: { fontSize: 9 },
-      headStyles: { fillColor: [2, 83, 115] }
+    movimientos.forEach(mov => {
+      doc.text(`${mov.concepto} (${mov.tipo === 'ingreso' ? 'Ingreso' : 'Egreso'})`, 25, y);
+      doc.text(`${mov.tipo === 'ingreso' ? '+' : '-'}$${mov.monto.toLocaleString()}`, 120, y);
+      y += 5;
     });
-    y = doc.lastAutoTable.finalY + 10;
+    
+    doc.text(`Total Ingresos extras: +$${ingresos.toLocaleString()}`, 25, y);
+    y += 5;
+    doc.text(`Total Egresos: -$${egresos.toLocaleString()}`, 25, y);
+    y += 10;
   }
 
-  // Detalle de cierre
-  doc.setFontSize(12);
+  // Cierre
   doc.text('DETALLE DE CIERRE', 20, y);
+  y += 8;
   
-  const efectivoEsperado = cierre.apertura + ventasPeriodo.efectivo + 
-    movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0) -
-    movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0);
-
-  doc.autoTable({
-    startY: y + 5,
-    body: [
-      ['Fondo inicial de apertura', `$${cierre.apertura?.toLocaleString()}`],
-      ['Ventas en efectivo', `+$${ventasPeriodo.efectivo.toLocaleString()}`],
-      ['Ingresos adicionales', `+$${movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0).toLocaleString()}`],
-      ['Egresos', `-$${movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0).toLocaleString()}`],
-      ['EFECTIVO ESPERADO', `$${efectivoEsperado.toLocaleString()}`],
-      ['EFECTIVO CONTADO', `$${cierre.efectivo_contado?.toLocaleString()}`],
-      ['DIFERENCIA', `${cierre.diferencia >= 0 ? '+' : ''}$${cierre.diferencia?.toLocaleString()}`]
-    ],
-    theme: 'plain',
-    styles: { fontSize: 10 },
-    bodyStyles: { textColor: [0, 0, 0] }
+  const totalIngresos = movimientos?.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0) || 0;
+  const totalEgresos = movimientos?.filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0) || 0;
+  const efectivoEsperado = (cierre.apertura || 0) + (ventasPeriodo.efectivo || 0) + totalIngresos - totalEgresos;
+  
+  const cierreData = [
+    ['Fondo inicial:', `$${(cierre.apertura || 0).toLocaleString()}`],
+    ['Ventas en efectivo:', `+$${(ventasPeriodo.efectivo || 0).toLocaleString()}`],
+    ['Ingresos adicionales:', `+$${totalIngresos.toLocaleString()}`],
+    ['Egresos:', `-$${totalEgresos.toLocaleString()}`],
+    ['EFECTIVO ESPERADO:', `$${efectivoEsperado.toLocaleString()}`],
+    ['EFECTIVO CONTADO:', `$${(cierre.efectivo_contado || 0).toLocaleString()}`],
+    ['DIFERENCIA:', `${(cierre.diferencia || 0) >= 0 ? '+' : ''}$${(cierre.diferencia || 0).toLocaleString()}`]
+  ];
+  
+  cierreData.forEach(row => {
+    doc.text(row[0], 25, y);
+    doc.text(row[1], 120, y);
+    y += 6;
   });
+  y += 10;
 
-  y = doc.lastAutoTable.finalY + 15;
-
-  // Pedidos pendientes (si los hay)
-  if (pedidosPendientes.length > 0) {
+  // Pedidos pendientes
+  if (pedidosPendientes && pedidosPendientes.length > 0) {
     doc.setTextColor(255, 0, 0);
     doc.text('⚠️ PEDIDOS PENDIENTES DE PAGO', 20, y);
     doc.setTextColor(0, 0, 0);
+    y += 8;
     
-    doc.autoTable({
-      startY: y + 5,
-      head: [['Ticket', 'Mesa', 'Total', 'Estado']],
-      body: pedidosPendientes.map(p => [
-        p.numero_factura || 'N/A',
-        p.mesa || '-',
-        `$${p.total_neto?.toLocaleString()}`,
-        p.estado
-      ]),
-      theme: 'striped',
-      styles: { fontSize: 9, textColor: [255, 0, 0] }
+    pedidosPendientes.forEach(p => {
+      doc.text(`Ticket ${p.numero_factura || 'N/A'} - Mesa ${p.mesa || '-'} - $${(p.total_neto || 0).toLocaleString()}`, 25, y);
+      y += 5;
     });
-    y = doc.lastAutoTable.finalY + 10;
+    y += 5;
   }
 
   // Observaciones
   if (cierre.observaciones) {
     doc.text('Observaciones:', 20, y);
-    doc.setFontSize(9);
-    doc.text(cierre.observaciones, 20, y + 5);
+    y += 6;
+    const splitObs = doc.splitTextToSize(cierre.observaciones, 170);
+    doc.text(splitObs, 25, y);
   }
 
-  // Pie de página
-  doc.setFontSize(8);
-  doc.text('Documento generado por POS Administrable', 105, 280, { align: 'center' });
-  
-  // Abrir PDF
+  // Guardar
   doc.save(`cierre_caja_${cierre.fecha}.pdf`);
 };

@@ -1,11 +1,14 @@
 'use client';
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import LoadingAnimation from '@/components/LoadingAnimation';
 import NotificationToast from '@/components/NotificationToast';
 import { imprimirTicket } from '@/components/TicketPrinter';
 
 export default function POSPage() {
+  const router = useRouter();
+  const [verificandoCajaInicial, setVerificandoCajaInicial] = useState(true);
   const [categorias, setCategorias] = useState([]);
   const [productos, setProductos] = useState([]);
   const [combos, setCombos] = useState([]);
@@ -21,7 +24,6 @@ export default function POSPage() {
   // Estado de caja
   const [cajaAbierta, setCajaAbierta] = useState(false);
   const [cierreActivo, setCierreActivo] = useState(null);
-  const [verificandoCaja, setVerificandoCaja] = useState(true);
   
   // Modal para combos
   const [modalCombo, setModalCombo] = useState({ 
@@ -57,24 +59,104 @@ export default function POSPage() {
     mensaje_pie: '¡Gracias por su compra!'
   });
 
+  // VERIFICACIÓN INICIAL - Obtener caja abierta
   useEffect(() => {
-    verificarCajaAbierta();
-    cargarConfigEmpresa();
-  }, []);
-
-  useEffect(() => {
-    if (cajaAbierta) {
-      cargarDatos();
+    async function verificarCajaYRedirigir() {
+      const fecha = new Date().toISOString().split('T')[0];
+      
+      const { data, error } = await supabase
+        .from('cierres_caja')
+        .select('*')
+        .eq('fecha', fecha)
+        .eq('cerrado', false)
+        .maybeSingle();
+      
+      console.log('Verificando caja en POS:', { data, error });
+      
+      if (!data) {
+        // No hay caja abierta, redirigir a /pos/caja
+        console.log('No hay caja abierta, redirigiendo a /pos/caja');
+        router.push('/pos/caja');
+      } else {
+        // Hay caja abierta, guardar datos y cargar
+        console.log('Caja abierta encontrada:', data);
+        setCajaAbierta(true);
+        setCierreActivo(data);
+        setVerificandoCajaInicial(false);
+        // Cargar todos los datos
+        await cargarConfigEmpresa();
+        await cargarDatosConCaja(data.id);
+      }
     }
-  }, [cajaAbierta]);
+    
+    verificarCajaYRedirigir();
+  }, [router]);
 
-  useEffect(() => {
-    filtrarProductos();
-  }, [productos, combos, categoriaSeleccionada, busqueda]);
-
-  const mostrarNotificacion = (message, type = 'success') => {
-    setNotificacion({ show: true, message, type });
-  };
+  // Función para cargar datos después de tener el cierre activo
+  async function cargarDatosConCaja(cierreId) {
+    setCargando(true);
+    
+    try {
+      // Cargar categorías
+      const { data: categoriasData } = await supabase
+        .from('categorias')
+        .select('*')
+        .eq('activo', true)
+        .order('nombre');
+      
+      // Cargar productos activos
+      const { data: productosData } = await supabase
+        .from('productos')
+        .select('*, categorias(*)')
+        .eq('activo', true)
+        .order('nombre');
+      
+      // Cargar combos activos
+      const { data: combosData } = await supabase
+        .from('combos')
+        .select(`
+          *,
+          combo_productos (
+            *,
+            productos (*)
+          )
+        `)
+        .eq('activo', true)
+        .order('nombre');
+      
+      // Cargar configuración de IVA
+      const { data: ivaData } = await supabase
+        .from('config_iva')
+        .select('*')
+        .eq('activo', true);
+      
+      // Cargar medios de pago
+      const { data: mediosData } = await supabase
+        .from('medios_pago')
+        .select('*')
+        .eq('activo', true);
+      
+      setCategorias(categoriasData || []);
+      setProductos(productosData || []);
+      setCombos(combosData || []);
+      setConfigIva(ivaData || []);
+      setMediosPago(mediosData || []);
+      
+      if (ivaData && ivaData.length > 0 && !configPedido.iva_id) {
+        setConfigPedido(prev => ({ ...prev, iva_id: ivaData[0].id.toString() }));
+      }
+      
+      if (mediosData && mediosData.length > 0 && !configPedido.medio_pago_id) {
+        setConfigPedido(prev => ({ ...prev, medio_pago_id: mediosData[0].id.toString() }));
+      }
+      
+      console.log('Datos cargados correctamente');
+    } catch (error) {
+      console.error('Error cargando datos:', error);
+    } finally {
+      setCargando(false);
+    }
+  }
 
   async function cargarConfigEmpresa() {
     const { data } = await supabase
@@ -93,81 +175,6 @@ export default function POSPage() {
     }
   }
 
-  async function verificarCajaAbierta() {
-    setVerificandoCaja(true);
-    const fecha = new Date().toISOString().split('T')[0];
-    
-    const { data } = await supabase
-      .from('cierres_caja')
-      .select('*')
-      .eq('fecha', fecha)
-      .eq('cerrado', false)
-      .maybeSingle();
-    
-    if (data) {
-      setCajaAbierta(true);
-      setCierreActivo(data);
-    } else {
-      setCajaAbierta(false);
-      setCierreActivo(null);
-    }
-    setVerificandoCaja(false);
-  }
-
-  async function cargarDatos() {
-    setCargando(true);
-    
-    const { data: categoriasData } = await supabase
-      .from('categorias')
-      .select('*')
-      .eq('activo', true)
-      .order('nombre');
-    
-    const { data: productosData } = await supabase
-      .from('productos')
-      .select('*, categorias(*)')
-      .eq('activo', true)
-      .order('nombre');
-    
-    const { data: combosData } = await supabase
-      .from('combos')
-      .select(`
-        *,
-        combo_productos (
-          *,
-          productos (*)
-        )
-      `)
-      .eq('activo', true)
-      .order('nombre');
-    
-    const { data: ivaData } = await supabase
-      .from('config_iva')
-      .select('*')
-      .eq('activo', true);
-    
-    const { data: mediosData } = await supabase
-      .from('medios_pago')
-      .select('*')
-      .eq('activo', true);
-    
-    setCategorias(categoriasData || []);
-    setProductos(productosData || []);
-    setCombos(combosData || []);
-    setConfigIva(ivaData || []);
-    setMediosPago(mediosData || []);
-    
-    if (ivaData && ivaData.length > 0 && !configPedido.iva_id) {
-      setConfigPedido(prev => ({ ...prev, iva_id: ivaData[0].id.toString() }));
-    }
-    
-    if (mediosData && mediosData.length > 0 && !configPedido.medio_pago_id) {
-      setConfigPedido(prev => ({ ...prev, medio_pago_id: mediosData[0].id.toString() }));
-    }
-    
-    setCargando(false);
-  }
-
   function filtrarProductos() {
     let filtrados = [...productos];
     if (categoriaSeleccionada) {
@@ -178,6 +185,11 @@ export default function POSPage() {
     }
     setProductosFiltrados(filtrados);
   }
+
+  // Ejecutar filtrado cuando cambien los productos o filtros
+  useEffect(() => {
+    filtrarProductos();
+  }, [productos, categoriaSeleccionada, busqueda]);
 
   function agregarProductoAlCarrito(producto) {
     const itemExistente = carrito.find(i => i.id === producto.id && i.tipo !== 'combo');
@@ -284,6 +296,10 @@ export default function POSPage() {
   const descuentoAplicado = calcularDescuento();
   const totalNeto = totalProductos - descuentoAplicado;
 
+  const mostrarNotificacion = (message, type = 'success') => {
+    setNotificacion({ show: true, message, type });
+  };
+
   function abrirResumen() {
     if (carrito.length === 0) {
       mostrarNotificacion('Agrega productos al pedido', 'error');
@@ -295,7 +311,6 @@ export default function POSPage() {
     }
     if (!cajaAbierta) {
       mostrarNotificacion('La caja debe estar abierta para realizar pedidos', 'error');
-      verificarCajaAbierta();
       return;
     }
     setModalResumen(true);
@@ -429,40 +444,9 @@ export default function POSPage() {
     mostrarNotificacion('Pedido completado. ¡Listo para nuevo pedido!', 'success');
   }
 
-  if (verificandoCaja || cargando) {
+  // Mostrar loading mientras se verifica la caja inicialmente o se cargan datos
+  if (verificandoCajaInicial || cargando) {
     return <LoadingAnimation />;
-  }
-
-  if (!cajaAbierta) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-gray-900 to-gray-800 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-2xl overflow-hidden">
-          <div className="bg-gradient-to-r from-red-500 to-orange-500 p-6 text-center">
-            <div className="w-24 h-24 bg-white/20 rounded-full flex items-center justify-center mx-auto mb-4">
-              <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-              </svg>
-            </div>
-            <h1 className="text-2xl font-bold text-white">🔴 Caja Cerrada</h1>
-            <p className="text-white/80 text-sm mt-2">No se pueden realizar pedidos</p>
-          </div>
-          <div className="p-6 text-center">
-            <button
-              onClick={() => window.location.href = '/pos/caja'}
-              className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 transition-all font-semibold shadow-md"
-            >
-              Abrir Caja
-            </button>
-            <button
-              onClick={verificarCajaAbierta}
-              className="mt-4 text-sm text-gray-400 hover:text-gray-600 transition-colors block w-full text-center"
-            >
-              ↻ Verificar estado de caja
-            </button>
-          </div>
-        </div>
-      </div>
-    );
   }
 
   return (
@@ -495,6 +479,7 @@ export default function POSPage() {
 
       <div className="flex-1 container mx-auto p-4 overflow-hidden">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
+          {/* Panel izquierdo - Productos */}
           <div className="lg:col-span-2 flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden">
             <div className="p-4 border-b border-gray-100 space-y-3">
               <div className="relative">
@@ -578,6 +563,7 @@ export default function POSPage() {
             </div>
           </div>
 
+          {/* Panel derecho - Pedido Actual */}
           <div className="bg-white rounded-xl shadow-sm flex flex-col h-full overflow-hidden">
             <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-[#F2F2F2] to-white">
               <h2 className="text-lg font-bold text-[#025373] flex items-center gap-2">
