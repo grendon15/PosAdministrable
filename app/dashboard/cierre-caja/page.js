@@ -4,23 +4,42 @@ import { supabase } from '@/lib/supabase';
 import LoadingAnimation from '@/components/LoadingAnimation';
 import NotificationToast from '@/components/NotificationToast';
 import { usePermissions } from '@/hooks/usePermissions';
+import { getFechaColombiaStr, formatFechaColombia, formatHoraOnly } from '@/lib/timezone';
+
+// ✅ NUEVA: Función para formatear fecha YYYY-MM-DD a DD/MM/YYYY
+function formatearFechaDDMMYYYY(fechaStr) {
+  if (!fechaStr) return '';
+  
+  // Si ya viene con formato ISO completo, extraer solo la fecha
+  if (fechaStr.includes('T')) {
+    fechaStr = fechaStr.split('T')[0];
+  }
+  
+  const partes = fechaStr.split('-');
+  if (partes.length === 3) {
+    return `${partes[2]}/${partes[1]}/${partes[0]}`;
+  }
+  return fechaStr;
+}
 
 export default function CierreCajaDashboardPage() {
   const [cargando, setCargando] = useState(true);
   const [cierres, setCierres] = useState([]);
-  // Inicializamos con la fecha de hoy
-  const [filtroFecha, setFiltroFecha] = useState(new Date().toISOString().split('T')[0]);
-  const [modalDetalle, setModalDetalle] = useState({ open: false, cierre: null, movimientos: [] });
+  const [filtroFecha, setFiltroFecha] = useState(getFechaColombiaStr());
+  const [modalDetalle, setModalDetalle] = useState({ 
+    open: false, 
+    cierre: null, 
+    movimientos: [],
+    pedidos: []
+  });
   const [notificacion, setNotificacion] = useState({ show: false, message: '', type: 'success' });
   
-  // Permisos
   const { puedeVer, puedeEditar, cargando: cargandoPermisos } = usePermissions();
   const tienePermiso = puedeVer('caja');
   const puedeExportar = puedeEditar('caja');
 
   useEffect(() => {
     if (tienePermiso) {
-      // Cargamos automáticamente los datos del día actual al iniciar
       buscarCierres();
     } else {
       setCargando(false);
@@ -31,7 +50,6 @@ export default function CierreCajaDashboardPage() {
     setNotificacion({ show: true, message, type });
   };
 
-  // Función para ejecutar la búsqueda manual
   async function buscarCierres() {
     setCargando(true);
     
@@ -39,13 +57,11 @@ export default function CierreCajaDashboardPage() {
       let query = supabase
         .from('cierres_caja')
         .select('*')
-        .order('fecha', { ascending: false });
+        .order('created_at', { ascending: false });
 
-      // Si hay una fecha seleccionada, filtramos en el servidor
       if (filtroFecha) {
         query = query.eq('fecha', filtroFecha);
       } else {
-        // Si no hay fecha, traemos los últimos 50 (opcional)
         query = query.limit(50);
       }
 
@@ -53,7 +69,32 @@ export default function CierreCajaDashboardPage() {
 
       if (error) throw error;
       
-      setCierres(data || []);
+      // ✅ MEJORADO: Los datos ya vienen del cierre, no necesitamos recalcular
+      // Solo calculamos ventas_real para mostrarlo como referencia
+      const cierresConDatos = await Promise.all((data || []).map(async (cierre) => {
+        const { data: pedidos } = await supabase
+          .from('pedidos')
+          .select('total_neto')
+          .eq('cierre_id', cierre.id)
+          .eq('estado', 'pagado');
+        
+        const ventasTotalReal = pedidos?.reduce((sum, p) => sum + (p.total_neto || 0), 0) || 0;
+        
+        return {
+          ...cierre,
+          ventas_total_real: ventasTotalReal,
+          // ✅ Los datos del cierre ya tienen los valores guardados al momento del cierre
+          // Si el cierre no está cerrado, mostramos 0 o calculamos en tiempo real
+          ventas_efectivo_mostrar: cierre.cerrado ? (cierre.ventas_efectivo || 0) : 0,
+          ventas_tarjeta_mostrar: cierre.cerrado ? (cierre.ventas_tarjeta || 0) : 0,
+          ventas_transferencia_mostrar: cierre.cerrado ? (cierre.ventas_transferencia || 0) : 0,
+          ventas_total_mostrar: cierre.cerrado ? (cierre.ventas_total || 0) : ventasTotalReal,
+          subtotal_sin_iva_mostrar: cierre.cerrado ? (cierre.subtotal_sin_iva || 0) : 0,
+          impuesto_total_mostrar: cierre.cerrado ? (cierre.impuesto_total || 0) : 0
+        };
+      }));
+      
+      setCierres(cierresConDatos || []);
       
       if (data && data.length === 0 && filtroFecha) {
         mostrarNotificacion('No se encontraron cierres para esta fecha', 'info');
@@ -66,35 +107,77 @@ export default function CierreCajaDashboardPage() {
     }
   }
 
-  // Función para restablecer filtro al día de hoy
   function restablecerFiltro() {
-    const hoy = new Date().toISOString().split('T')[0];
+    const hoy = getFechaColombiaStr();
     setFiltroFecha(hoy);
-    // Forzamos la búsqueda con el nuevo valor ya que el estado es asíncrono
     ejecutarBusquedaConFecha(hoy);
   }
 
-  // Helper para ejecutar búsqueda con fecha específica
   async function ejecutarBusquedaConFecha(fecha) {
     setCargando(true);
-    const { data } = await supabase
-      .from('cierres_caja')
-      .select('*')
-      .eq('fecha', fecha)
-      .order('fecha', { ascending: false });
     
-    setCierres(data || []);
-    setCargando(false);
+    try {
+      const { data } = await supabase
+        .from('cierres_caja')
+        .select('*')
+        .eq('fecha', fecha)
+        .order('created_at', { ascending: false });
+      
+      const cierresConDatos = await Promise.all((data || []).map(async (cierre) => {
+        const { data: pedidos } = await supabase
+          .from('pedidos')
+          .select('total_neto')
+          .eq('cierre_id', cierre.id)
+          .eq('estado', 'pagado');
+        
+        const ventasTotalReal = pedidos?.reduce((sum, p) => sum + (p.total_neto || 0), 0) || 0;
+        
+        return {
+          ...cierre,
+          ventas_total_real: ventasTotalReal,
+          ventas_efectivo_mostrar: cierre.cerrado ? (cierre.ventas_efectivo || 0) : 0,
+          ventas_tarjeta_mostrar: cierre.cerrado ? (cierre.ventas_tarjeta || 0) : 0,
+          ventas_transferencia_mostrar: cierre.cerrado ? (cierre.ventas_transferencia || 0) : 0,
+          ventas_total_mostrar: cierre.cerrado ? (cierre.ventas_total || 0) : ventasTotalReal,
+          subtotal_sin_iva_mostrar: cierre.cerrado ? (cierre.subtotal_sin_iva || 0) : 0,
+          impuesto_total_mostrar: cierre.cerrado ? (cierre.impuesto_total || 0) : 0
+        };
+      }));
+      
+      setCierres(cierresConDatos || []);
+    } catch (error) {
+      console.error('Error:', error);
+      mostrarNotificacion('Error al buscar cierres', 'error');
+    } finally {
+      setCargando(false);
+    }
   }
 
   async function verDetalleCierre(cierre) {
+    // Cargar movimientos
     const { data: movimientos } = await supabase
       .from('movimientos_caja')
       .select('*')
       .eq('cierre_id', cierre.id)
       .order('created_at', { ascending: false });
     
-    setModalDetalle({ open: true, cierre, movimientos: movimientos || [] });
+    // Cargar pedidos asociados
+    const { data: pedidosAsociados } = await supabase
+      .from('pedidos')
+      .select(`
+        *,
+        medio_pago:medios_pago (nombre)
+      `)
+      .eq('cierre_id', cierre.id)
+      .eq('estado', 'pagado')
+      .order('pagado_at', { ascending: false });
+    
+    setModalDetalle({ 
+      open: true, 
+      cierre, 
+      movimientos: movimientos || [],
+      pedidos: pedidosAsociados || []
+    });
   }
 
   async function exportarReporte() {
@@ -104,21 +187,20 @@ export default function CierreCajaDashboardPage() {
     }
     
     try {
-      const fecha = new Date().toISOString().split('T')[0];
-      let csvContent = "Fecha,Fondo Inicial,Ventas Efectivo,Ventas Tarjeta,Ventas Transferencia,Ventas Total,Efectivo Contado,Diferencia,Observaciones,Estado\n";
+      // ✅ MEJORADO: CSV con las columnas solicitadas
+      let csvContent = "Fecha,Fondo Inicial,Ventas Efectivo,Ventas Total,Subtotal Sin IVA,Impuesto,Diferencia,Estado\n";
       
-      // Usamos los cierres ya cargados y filtrados
       cierres.forEach(cierre => {
-        csvContent += `${cierre.fecha},`;
-        csvContent += `${cierre.apertura},`;
-        csvContent += `${cierre.ventas_efectivo || 0},`;
-        csvContent += `${cierre.ventas_tarjeta || 0},`;
-        csvContent += `${cierre.ventas_transferencia || 0},`;
-        csvContent += `${cierre.ventas_total || 0},`;
-        csvContent += `${cierre.efectivo_contado || 0},`;
-        csvContent += `${cierre.diferencia || 0},`;
-        csvContent += `"${cierre.observaciones || ''}",`;
-        csvContent += `${cierre.cerrado ? 'Cerrado' : 'Abierto'}\n`;
+        const fechaFormateada = formatearFechaDDMMYYYY(cierre.fecha);
+        const fondoInicial = cierre.apertura || 0;
+        const ventasEfectivo = cierre.ventas_efectivo || 0;
+        const ventasTotal = cierre.ventas_total || cierre.ventas_total_real || 0;
+        const subtotalSinIva = cierre.subtotal_sin_iva || 0;
+        const impuesto = cierre.impuesto_total || 0;
+        const diferencia = cierre.diferencia || 0;
+        const estado = cierre.cerrado ? 'Cerrado' : 'Abierto';
+        
+        csvContent += `${fechaFormateada},${fondoInicial},${ventasEfectivo},${ventasTotal},${subtotalSinIva},${impuesto},${diferencia},${estado}\n`;
       });
       
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -167,13 +249,11 @@ export default function CierreCajaDashboardPage() {
         onClose={() => setNotificacion({ show: false, message: '', type: 'success' })}
       />
 
-      {/* Header */}
       <div className="bg-gradient-to-r from-[#025373] to-[#116EBF] rounded-2xl p-6 text-white">
         <h1 className="text-3xl font-bold">💰 Reporte de Cierres de Caja</h1>
         <p className="text-white/80 mt-1">Consulta y exporta el historial de cierres realizados por los cajeros</p>
       </div>
 
-      {/* Filtros */}
       <div className="bg-white rounded-xl shadow-sm p-4 flex flex-wrap gap-4 items-end justify-between">
         <div className="flex flex-wrap gap-4 items-end">
           <div>
@@ -217,7 +297,6 @@ export default function CierreCajaDashboardPage() {
         )}
       </div>
 
-      {/* Tabla de cierres */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">
@@ -227,43 +306,51 @@ export default function CierreCajaDashboardPage() {
                 <th className="text-right py-4 px-5 text-[#025373] font-semibold">Fondo Inicial</th>
                 <th className="text-right py-4 px-5 text-[#025373] font-semibold">Ventas Efectivo</th>
                 <th className="text-right py-4 px-5 text-[#025373] font-semibold">Ventas Total</th>
-                <th className="text-right py-4 px-5 text-[#025373] font-semibold">Efectivo Contado</th>
+                <th className="text-right py-4 px-5 text-[#025373] font-semibold">Subtotal Sin IVA</th>
+                <th className="text-right py-4 px-5 text-[#025373] font-semibold">Impuesto</th>
                 <th className="text-right py-4 px-5 text-[#025373] font-semibold">Diferencia</th>
                 <th className="text-center py-4 px-5 text-[#025373] font-semibold">Estado</th>
                 <th className="text-center py-4 px-5 text-[#025373] font-semibold">Acciones</th>
-              </tr> {/* <-- CORRECCIÓN: Etiqueta </tr> agregada */}
+              </tr>
             </thead>
             <tbody>
               {cierres.length === 0 ? (
                 <tr>
-                  <td colSpan="8" className="text-center py-12 text-[#595959]">
+                  <td colSpan="9" className="text-center py-12 text-[#595959]">
                     No hay cierres registrados. Seleccione una fecha y presione Consultar.
                   </td>
                 </tr>
               ) : (
                 cierres.map(cierre => (
                   <tr key={cierre.id} className="border-b border-gray-100 hover:bg-[#F2F2F2] transition-colors">
-                    <td className="py-4 px-5 text-[#595959]">{new Date(cierre.fecha).toLocaleDateString('es-CO')}</td>
-                    <td className="py-4 px-5 text-right">${cierre.apertura?.toLocaleString()}</td>
-                    <td className="py-4 px-5 text-right">${cierre.ventas_efectivo?.toLocaleString()}</td>
-                    <td className="py-4 px-5 text-right font-semibold">${cierre.ventas_total?.toLocaleString()}</td>
-                    <td className="py-4 px-5 text-right">${cierre.efectivo_contado?.toLocaleString()}</td>
+                    {/* ✅ MEJORADO: Fecha formateada correctamente DD/MM/YYYY */}
+                    <td className="py-4 px-5 text-[#595959] font-medium">
+                      {formatearFechaDDMMYYYY(cierre.fecha)}
+                    </td>
+                    {/* ✅ MEJORADO: Datos directos del cierre */}
+                    <td className="py-4 px-5 text-right">${(cierre.apertura || 0).toLocaleString()}</td>
+                    <td className="py-4 px-5 text-right">${(cierre.ventas_efectivo_mostrar || 0).toLocaleString()}</td>
+                    <td className="py-4 px-5 text-right font-semibold text-[#116EBF]">
+                      ${(cierre.ventas_total_mostrar || 0).toLocaleString()}
+                    </td>
+                    <td className="py-4 px-5 text-right">${(cierre.subtotal_sin_iva_mostrar || 0).toLocaleString()}</td>
+                    <td className="py-4 px-5 text-right">${(cierre.impuesto_total_mostrar || 0).toLocaleString()}</td>
                     <td className={`py-4 px-5 text-right font-semibold ${
                       cierre.diferencia === 0 ? 'text-green-600' : cierre.diferencia > 0 ? 'text-yellow-600' : 'text-red-600'
                     }`}>
-                      {cierre.diferencia > 0 ? '+' : ''}{cierre.diferencia?.toLocaleString()}
+                      {cierre.diferencia > 0 ? '+' : ''}{(cierre.diferencia || 0).toLocaleString()}
                     </td>
                     <td className="py-4 px-5 text-center">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${
                         cierre.cerrado ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
                       }`}>
-                        {cierre.cerrado ? 'Cerrado' : 'Abierto'}
+                        {cierre.cerrado ? '✅ Cerrado' : '🔄 Abierto'}
                       </span>
                     </td>
                     <td className="py-4 px-5 text-center">
                       <button
                         onClick={() => verDetalleCierre(cierre)}
-                        className="px-3 py-1.5 bg-[#116EBF] text-white rounded-lg hover:bg-[#025373] text-sm"
+                        className="px-3 py-1.5 bg-[#116EBF] text-white rounded-lg hover:bg-[#025373] text-sm transition-colors"
                       >
                         Ver detalle
                       </button>
@@ -282,16 +369,21 @@ export default function CierreCajaDashboardPage() {
       {/* MODAL DE DETALLE DE CIERRE */}
       {modalDetalle.open && modalDetalle.cierre && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fadeIn">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-            <div className="bg-gradient-to-r from-[#025373] to-[#116EBF] px-6 py-4 rounded-t-2xl sticky top-0">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="bg-gradient-to-r from-[#025373] to-[#116EBF] px-6 py-4 rounded-t-2xl sticky top-0 z-10">
               <div className="flex justify-between items-center">
                 <div>
                   <h3 className="text-xl font-bold text-white">📋 Detalle de Cierre</h3>
+                  {/* ✅ MEJORADO: Fecha correcta en el modal */}
                   <p className="text-white/70 text-sm mt-1">
-                    {new Date(modalDetalle.cierre.fecha).toLocaleDateString('es-CO')}
+                    Fecha: {formatearFechaDDMMYYYY(modalDetalle.cierre.fecha)}
+                    {modalDetalle.cierre.cerrado_at && ` | Cerrado: ${formatFechaColombia(modalDetalle.cierre.cerrado_at)}`}
                   </p>
                 </div>
-                <button onClick={() => setModalDetalle({ open: false, cierre: null, movimientos: [] })} className="text-white/70 hover:text-white">
+                <button 
+                  onClick={() => setModalDetalle({ open: false, cierre: null, movimientos: [], pedidos: [] })} 
+                  className="text-white/70 hover:text-white transition-colors"
+                >
                   <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                   </svg>
@@ -300,94 +392,191 @@ export default function CierreCajaDashboardPage() {
             </div>
             
             <div className="p-6 space-y-5">
-              <div className="grid grid-cols-2 gap-4">
+              {/* ✅ MEJORADO: Datos del cierre directamente */}
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                 <div className="bg-[#F2F2F2] rounded-lg p-3">
                   <p className="text-xs text-[#595959]">Fondo inicial</p>
-                  <p className="text-lg font-bold text-[#025373]">${modalDetalle.cierre.apertura?.toLocaleString()}</p>
+                  <p className="text-lg font-bold text-[#025373]">${(modalDetalle.cierre.apertura || 0).toLocaleString()}</p>
                 </div>
                 <div className="bg-[#F2F2F2] rounded-lg p-3">
-                  <p className="text-xs text-[#595959]">Total ventas</p>
-                  <p className="text-lg font-bold text-[#025373]">${modalDetalle.cierre.ventas_total?.toLocaleString()}</p>
+                  <p className="text-xs text-[#595959]">Ventas Efectivo</p>
+                  <p className="text-lg font-bold text-[#025373]">${(modalDetalle.cierre.ventas_efectivo || 0).toLocaleString()}</p>
+                </div>
+                <div className="bg-[#F2F2F2] rounded-lg p-3">
+                  <p className="text-xs text-[#595959]">Ventas Total</p>
+                  <p className="text-lg font-bold text-[#116EBF]">${(modalDetalle.cierre.ventas_total || modalDetalle.pedidos.reduce((sum, p) => sum + (p.total_neto || 0), 0)).toLocaleString()}</p>
+                </div>
+                <div className="bg-[#F2F2F2] rounded-lg p-3">
+                  <p className="text-xs text-[#595959]">Subtotal Sin IVA</p>
+                  <p className="text-lg font-bold text-[#025373]">${(modalDetalle.cierre.subtotal_sin_iva || 0).toLocaleString()}</p>
+                </div>
+                <div className="bg-[#F2F2F2] rounded-lg p-3">
+                  <p className="text-xs text-[#595959]">Impuesto Total</p>
+                  <p className="text-lg font-bold text-[#025373]">${(modalDetalle.cierre.impuesto_total || 0).toLocaleString()}</p>
+                </div>
+                <div className={`rounded-lg p-3 ${
+                  modalDetalle.cierre.diferencia === 0 ? 'bg-green-50' : modalDetalle.cierre.diferencia > 0 ? 'bg-yellow-50' : 'bg-red-50'
+                }`}>
+                  <p className="text-xs text-[#595959]">Diferencia</p>
+                  <p className={`text-lg font-bold ${
+                    modalDetalle.cierre.diferencia === 0 ? 'text-green-600' : modalDetalle.cierre.diferencia > 0 ? 'text-yellow-600' : 'text-red-600'
+                  }`}>
+                    {modalDetalle.cierre.diferencia > 0 ? '+' : ''}{(modalDetalle.cierre.diferencia || 0).toLocaleString()}
+                  </p>
                 </div>
               </div>
 
               <div className="border border-gray-200 rounded-lg p-4">
-                <h4 className="font-semibold text-[#025373] mb-3">📊 Desglose de Ventas</h4>
+                <h4 className="font-semibold text-[#025373] mb-3">📊 Desglose de Ventas por Medio de Pago</h4>
                 <div className="space-y-2">
-                  <div className="flex justify-between">
-                    <span className="text-[#595959]">Efectivo:</span>
-                    <span>${modalDetalle.cierre.ventas_efectivo?.toLocaleString()}</span>
+                  <div className="flex justify-between items-center p-2 bg-[#F2F2F2] rounded">
+                    <span className="text-[#595959]">💵 Efectivo:</span>
+                    <span className="font-semibold">${(modalDetalle.cierre.ventas_efectivo || 0).toLocaleString()}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#595959]">Tarjeta:</span>
-                    <span>${modalDetalle.cierre.ventas_tarjeta?.toLocaleString()}</span>
+                  <div className="flex justify-between items-center p-2 bg-[#F2F2F2] rounded">
+                    <span className="text-[#595959]">💳 Tarjeta:</span>
+                    <span className="font-semibold">${(modalDetalle.cierre.ventas_tarjeta || 0).toLocaleString()}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-[#595959]">Transferencia:</span>
-                    <span>${modalDetalle.cierre.ventas_transferencia?.toLocaleString()}</span>
+                  <div className="flex justify-between items-center p-2 bg-[#F2F2F2] rounded">
+                    <span className="text-[#595959]">🏦 Transferencia:</span>
+                    <span className="font-semibold">${(modalDetalle.cierre.ventas_transferencia || 0).toLocaleString()}</span>
                   </div>
                 </div>
               </div>
 
-              {modalDetalle.movimientos.length > 0 && (
+              {/* Sección de Pedidos del período */}
+              {modalDetalle.pedidos && modalDetalle.pedidos.length > 0 && (
                 <div className="border border-gray-200 rounded-lg p-4">
-                  <h4 className="font-semibold text-[#025373] mb-3">💰 Movimientos de Caja</h4>
-                  <div className="space-y-2">
-                    {modalDetalle.movimientos.map(mov => (
-                      <div key={mov.id} className="flex justify-between items-center p-2 bg-[#F2F2F2] rounded">
+                  <h4 className="font-semibold text-[#025373] mb-3">📋 Pedidos del período ({modalDetalle.pedidos.length})</h4>
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {modalDetalle.pedidos.map(pedido => (
+                      <div key={pedido.id} className="flex justify-between items-center p-3 bg-[#F2F2F2] rounded-lg">
                         <div>
-                          <p className="text-sm font-medium">{mov.concepto}</p>
-                          <p className="text-xs text-[#595959]">{new Date(mov.created_at).toLocaleTimeString()}</p>
+                          <p className="text-sm font-medium text-[#025373]">
+                            Ticket: {pedido.numero_factura || `#${pedido.id}`}
+                          </p>
+                          <p className="text-xs text-[#595959]">
+                            {pedido.tipo === 'mesa' ? `🍽️ Mesa ${pedido.mesa}` : pedido.tipo === 'para_llevar' ? '🛍️ Para llevar' : '🏠 Domicilio'} - 
+                            {formatHoraOnly(pedido.pagado_at || pedido.created_at)}
+                          </p>
                         </div>
-                        <span className={mov.tipo === 'ingreso' ? 'text-green-600 font-bold' : 'text-red-500 font-bold'}>
-                          {mov.tipo === 'ingreso' ? '+' : '-'}${mov.monto.toLocaleString()}
-                        </span>
+                        <div className="text-right">
+                          <p className="font-bold text-[#116EBF]">${(pedido.total_neto || 0).toLocaleString()}</p>
+                          <p className="text-xs text-[#595959]">{pedido.medio_pago?.nombre || 'N/A'}</p>
+                        </div>
                       </div>
                     ))}
+                  </div>
+                  <div className="mt-3 pt-3 border-t border-gray-200 flex justify-between font-bold">
+                    <span>Total pedidos:</span>
+                    <span className="text-[#116EBF]">
+                      ${modalDetalle.pedidos.reduce((sum, p) => sum + (p.total_neto || 0), 0).toLocaleString()}
+                    </span>
                   </div>
                 </div>
               )}
 
-              <div className="bg-[#F2F2F2] rounded-lg p-4">
-                <div className="flex justify-between mb-2">
-                  <span className="text-[#595959]">Efectivo esperado:</span>
-                  <span className="font-semibold">${(
-                    modalDetalle.cierre.apertura + 
-                    modalDetalle.cierre.ventas_efectivo + 
-                    (modalDetalle.movimientos?.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0) || 0) - 
-                    (modalDetalle.movimientos?.filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0) || 0)
-                  ).toLocaleString()}</span>
+              {/* Movimientos de caja */}
+              {modalDetalle.movimientos && modalDetalle.movimientos.length > 0 && (
+                <div className="border border-gray-200 rounded-lg p-4">
+                  <h4 className="font-semibold text-[#025373] mb-3">💰 Movimientos de Caja</h4>
+                  <div className="space-y-2">
+                    {modalDetalle.movimientos.map(mov => (
+                      <div key={mov.id} className="flex justify-between items-center p-3 bg-[#F2F2F2] rounded-lg">
+                        <div>
+                          <p className="text-sm font-medium text-[#025373]">{mov.concepto}</p>
+                          <p className="text-xs text-[#595959]">{formatHoraOnly(mov.created_at)}</p>
+                        </div>
+                        <span className={`font-bold ${mov.tipo === 'ingreso' ? 'text-green-600' : 'text-red-500'}`}>
+                          {mov.tipo === 'ingreso' ? '+' : '-'}${(mov.monto || 0).toLocaleString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 pt-3 border-t border-gray-200 space-y-1 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-green-600">Total ingresos:</span>
+                      <span className="font-semibold text-green-600">
+                        +${modalDetalle.movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + (m.monto || 0), 0).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-red-500">Total egresos:</span>
+                      <span className="font-semibold text-red-500">
+                        -${modalDetalle.movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + (m.monto || 0), 0).toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-                <div className="flex justify-between mb-2">
-                  <span className="text-[#595959]">Efectivo contado:</span>
-                  <span className="font-semibold">${modalDetalle.cierre.efectivo_contado?.toLocaleString()}</span>
-                </div>
-                <div className="flex justify-between pt-2 border-t border-gray-300">
-                  <span className="font-bold text-[#025373]">Diferencia:</span>
-                  <span className={`text-xl font-bold ${
-                    modalDetalle.cierre.diferencia === 0 ? 'text-green-600' : 
-                    modalDetalle.cierre.diferencia > 0 ? 'text-yellow-600' : 'text-red-600'
+              )}
+
+              {/* Resumen final de efectivo */}
+              <div className="bg-gradient-to-r from-[#025373] to-[#116EBF] rounded-lg p-4 text-white">
+                <h4 className="font-semibold mb-3">💵 Resumen de Efectivo</h4>
+                <div className="space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-white/80">Fondo inicial:</span>
+                    <span className="font-semibold">${(modalDetalle.cierre.apertura || 0).toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-white/80">+ Ventas efectivo:</span>
+                    <span className="font-semibold">${(modalDetalle.cierre.ventas_efectivo || 0).toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-white/80">+ Ingresos:</span>
+                    <span className="font-semibold">
+                      ${modalDetalle.movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + (m.monto || 0), 0).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-white/80">- Egresos:</span>
+                    <span className="font-semibold">
+                      ${modalDetalle.movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + (m.monto || 0), 0).toLocaleString()}
+                    </span>
+                  </div>
+                  <div className="flex justify-between pt-2 border-t border-white/30">
+                    <span className="font-bold">Efectivo esperado:</span>
+                    <span className="font-bold text-lg">${
+                      (
+                        (modalDetalle.cierre.apertura || 0) + 
+                        (modalDetalle.cierre.ventas_efectivo || 0) + 
+                        modalDetalle.movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + (m.monto || 0), 0) - 
+                        modalDetalle.movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + (m.monto || 0), 0)
+                      ).toLocaleString()
+                    }</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-bold">Efectivo contado:</span>
+                    <span className="font-bold text-lg">${(modalDetalle.cierre.efectivo_contado || 0).toLocaleString()}</span>
+                  </div>
+                  <div className={`flex justify-between pt-2 border-t border-white/30 text-xl ${
+                    modalDetalle.cierre.diferencia === 0 ? 'text-green-300' : modalDetalle.cierre.diferencia > 0 ? 'text-yellow-300' : 'text-red-300'
                   }`}>
-                    {modalDetalle.cierre.diferencia > 0 ? '+' : ''}{modalDetalle.cierre.diferencia?.toLocaleString()}
-                  </span>
+                    <span className="font-bold">Diferencia:</span>
+                    <span className="font-bold">
+                      {modalDetalle.cierre.diferencia > 0 ? '+' : ''}{(modalDetalle.cierre.diferencia || 0).toLocaleString()}
+                    </span>
+                  </div>
                 </div>
               </div>
 
               {modalDetalle.cierre.observaciones && (
                 <div className="bg-yellow-50 rounded-lg p-3 border border-yellow-200">
-                  <p className="text-xs text-yellow-700 font-medium">Observaciones:</p>
+                  <p className="text-xs text-yellow-700 font-medium">📝 Observaciones:</p>
                   <p className="text-sm text-yellow-800">{modalDetalle.cierre.observaciones}</p>
                 </div>
               )}
 
               <div className="text-xs text-[#595959] text-center">
-                Cierre realizado por: {modalDetalle.cierre.usuario_nombre || 'Administrador'}<br/>
-                Fecha cierre: {new Date(modalDetalle.cierre.cerrado_at).toLocaleString('es-CO')}
+                Cierre realizado por: {modalDetalle.cierre.usuario_nombre || 'Administrador'}
               </div>
             </div>
             
             <div className="px-6 py-4 border-t border-gray-100 flex justify-end bg-[#F2F2F2] rounded-b-2xl">
-              <button onClick={() => setModalDetalle({ open: false, cierre: null, movimientos: [] })} className="px-5 py-2.5 border border-gray-300 rounded-lg hover:bg-white">
+              <button 
+                onClick={() => setModalDetalle({ open: false, cierre: null, movimientos: [], pedidos: [] })} 
+                className="px-5 py-2.5 border border-gray-300 rounded-lg hover:bg-white transition-colors"
+              >
                 Cerrar
               </button>
             </div>

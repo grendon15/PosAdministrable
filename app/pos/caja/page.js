@@ -7,6 +7,7 @@ import { usePermissions } from '@/hooks/usePermissions';
 import { useRouter } from 'next/navigation';
 import { generarPDFCierre } from '@/components/ReporteCierre';
 import ModalCierreProfesional from '@/components/ModalCierreProfesional';
+import { getColombiaTime, getFechaColombiaStr, getColombiaISOString, formatHoraOnly } from '@/lib/timezone';
 
 export default function CajaPOSPage() {
   const [cargando, setCargando] = useState(true);
@@ -39,7 +40,6 @@ export default function CajaPOSPage() {
   const [modalMovimiento, setModalMovimiento] = useState({ open: false, tipo: '', concepto: '', monto: '' });
   const [modalCierreProfesional, setModalCierreProfesional] = useState({ open: false });
 
-  // Configuración de la empresa
   const [configEmpresa, setConfigEmpresa] = useState({
     nombre: 'Mi Restaurante',
     nit: '900.000.000-0',
@@ -55,28 +55,26 @@ export default function CajaPOSPage() {
     if (tienePermiso) {
       cargarDatos();
       const interval = setInterval(() => {
-        if (cajaAbierta) {
-          cargarVentasPeriodo();
-          cargarMovimientos();
-          cargarPedidosPendientes(cierreActual?.id);
+        if (cajaAbierta && cierreActual?.id) {
+          cargarVentasPeriodo(cierreActual.id);
+          cargarMovimientos(cierreActual.id);
+          cargarPedidosPendientes(cierreActual.id);
         }
       }, 30000);
       return () => clearInterval(interval);
     } else {
       setCargando(false);
     }
-  }, [tienePermiso]);
+  }, [tienePermiso, cajaAbierta, cierreActual?.id]);
 
   useEffect(() => {
     if (cierreActual) {
       setCajaAbierta(!cierreActual.cerrado);
-      // Guardar en localStorage para que layout.js detecte el cambio
       if (!cierreActual.cerrado) {
         localStorage.setItem('cajaAbierta', 'true');
       } else {
         localStorage.setItem('cajaAbierta', 'false');
       }
-      // Disparar evento para actualizar layout
       window.dispatchEvent(new Event('storage'));
     }
   }, [cierreActual]);
@@ -117,30 +115,35 @@ export default function CajaPOSPage() {
     }
     
     await cargarCierreActual();
-    await cargarVentasPeriodo();
-    
     setCargando(false);
   }
 
   async function cargarCierreActual() {
-    const fecha = new Date().toISOString().split('T')[0];
-    
     const { data } = await supabase
       .from('cierres_caja')
       .select('*')
-      .eq('fecha', fecha)
+      .eq('cerrado', false)
       .order('created_at', { ascending: false })
       .limit(1);
     
+    console.log('Buscando cierre activo:', data);
+    
     if (data && data.length > 0) {
-      setCierreActual(data[0]);
-      if (!data[0].cerrado) {
-        await cargarMovimientos(data[0].id);
-        await cargarPedidosPendientes(data[0].id);
-      }
+      const cierre = data[0];
+      setCierreActual(cierre);
+      setCajaAbierta(true);
+      
+      // Cargar ventas Y movimientos PASANDO el ID explícitamente
+      await cargarVentasPeriodo(cierre.id);
+      await cargarMovimientos(cierre.id);
+      await cargarPedidosPendientes(cierre.id);
     } else {
+      console.log('No hay cierre activo');
       setCierreActual(null);
       setCajaAbierta(false);
+      setVentasPeriodo({ efectivo: 0, tarjeta: 0, transferencia: 0, total: 0, subtotal_sin_iva: 0, impuesto_total: 0 });
+      setMovimientos([]);
+      setPedidosPendientes([]);
     }
   }
 
@@ -170,20 +173,31 @@ export default function CajaPOSPage() {
     setMovimientos(data || []);
   }
 
-  async function cargarVentasPeriodo() {
-    if (!cierreActual) {
+  // ✅ MEJORADO: Ahora recibe cierreId como parámetro para evitar problemas de closure
+  async function cargarVentasPeriodo(cierreId = null) {
+    const id = cierreId || cierreActual?.id;
+    if (!id) {
       setVentasPeriodo({ efectivo: 0, tarjeta: 0, transferencia: 0, total: 0, subtotal_sin_iva: 0, impuesto_total: 0 });
       return;
     }
     
-    const { data: pedidos } = await supabase
+    console.log('🔄 Cargando ventas para cierre ID:', id);
+    
+    const { data: pedidos, error } = await supabase
       .from('pedidos')
       .select(`
         *,
         medio_pago:medios_pago (nombre)
       `)
       .eq('estado', 'pagado')
-      .eq('cierre_id', cierreActual.id);
+      .eq('cierre_id', id);
+    
+    if (error) {
+      console.error('Error cargando ventas:', error);
+      return;
+    }
+    
+    console.log('📦 Pedidos encontrados:', pedidos?.length, pedidos);
     
     let efectivo = 0;
     let tarjeta = 0;
@@ -196,6 +210,8 @@ export default function CajaPOSPage() {
       const medio = pedido.medio_pago?.nombre?.toLowerCase() || '';
       const monto = pedido.total_neto || 0;
       const impuesto = pedido.impuesto || 0;
+      
+      console.log(`Pedido ${pedido.numero_factura}: Medio=${pedido.medio_pago?.nombre}, Monto=${monto}, Impuesto=${impuesto}`);
       
       if (medio.includes('efectivo')) {
         efectivo += monto;
@@ -211,7 +227,12 @@ export default function CajaPOSPage() {
       impuestoTotal += impuesto;
     });
     
-    setVentasPeriodo({ efectivo, tarjeta, transferencia, total, subtotal_sin_iva: subtotalSinIva, impuesto_total: impuestoTotal });
+    const ventasCalculadas = { efectivo, tarjeta, transferencia, total, subtotal_sin_iva: subtotalSinIva, impuesto_total: impuestoTotal };
+    console.log('✅ Ventas calculadas:', ventasCalculadas);
+    
+    setVentasPeriodo(ventasCalculadas);
+    
+    return ventasCalculadas;
   }
 
   async function registrarMovimiento() {
@@ -246,8 +267,7 @@ export default function CajaPOSPage() {
         'success'
       );
       
-      await cargarMovimientos();
-      await cargarVentasPeriodo();
+      await cargarMovimientos(cierreActual.id);
       
       setModalMovimiento({ open: false, tipo: '', concepto: '', monto: '' });
       
@@ -263,17 +283,14 @@ export default function CajaPOSPage() {
       return;
     }
     
-    // VALIDACIÓN: Verificar si ya hay una caja abierta hoy
-    const fecha = new Date().toISOString().split('T')[0];
     const { data: cajaExistente } = await supabase
       .from('cierres_caja')
       .select('id, cerrado')
-      .eq('fecha', fecha)
       .eq('cerrado', false)
       .maybeSingle();
     
     if (cajaExistente) {
-      mostrarNotificacion('❌ Ya hay una caja abierta para el día de hoy. No se puede abrir otra.', 'error');
+      mostrarNotificacion('❌ Ya hay una caja abierta. No se puede abrir otra.', 'error');
       return;
     }
     
@@ -285,13 +302,18 @@ export default function CajaPOSPage() {
     }
     
     try {
+      const fechaStr = getFechaColombiaStr();
+      const fechaISOColombia = getColombiaISOString();
+      
       const { data, error } = await supabase
         .from('cierres_caja')
         .insert({
-          fecha: fecha,
+          fecha: fechaStr,
           apertura: fondo,
           usuario_nombre: 'Administrador',
-          cerrado: false
+          cerrado: false,
+          created_at: fechaISOColombia,
+          zona_horaria: 'America/Bogota'
         })
         .select();
       
@@ -301,14 +323,36 @@ export default function CajaPOSPage() {
       setModalApertura({ open: false });
       await cargarDatos();
       
-      // Forzar recarga de layout para mostrar botón POS
       localStorage.setItem('cajaAbierta', 'true');
       window.dispatchEvent(new Event('storage'));
+      
+      setTimeout(() => {
+        router.push('/pos');
+      }, 1500);
       
     } catch (error) {
       console.error('Error:', error);
       mostrarNotificacion('Error al abrir caja: ' + error.message, 'error');
     }
+  }
+
+  // ✅ MEJORADO: Recarga ventas ANTES de mostrar modal y ANTES de confirmar cierre
+  async function abrirModalCierre() {
+    if (pedidosPendientes.length > 0) {
+      mostrarNotificacion(`Hay ${pedidosPendientes.length} pedidos pendientes de pago`, 'error');
+      return;
+    }
+    
+    // Forzar recarga de datos antes de abrir el modal
+    console.log('🔄 Recargando datos antes de abrir modal de cierre...');
+    
+    if (cierreActual?.id) {
+      await cargarVentasPeriodo(cierreActual.id);
+      await cargarMovimientos(cierreActual.id);
+      await cargarPedidosPendientes(cierreActual.id);
+    }
+    
+    setModalCierreProfesional({ open: true });
   }
 
   async function cerrarCajaProfesional({ efectivoContado: efectivoContadoNum, observaciones: obs }) {
@@ -317,33 +361,130 @@ export default function CajaPOSPage() {
       return;
     }
     
-    const totalIngresos = movimientos.filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0);
-    const totalEgresos = movimientos.filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0);
-    const efectivoEsperadoVal = cierreActual.apertura + ventasPeriodo.efectivo + totalIngresos - totalEgresos;
+    if (!cierreActual?.id) {
+      mostrarNotificacion('No hay cierre activo', 'error');
+      return;
+    }
+    
+    // ✅ MEJORADO: Recalcular ventas DIRECTAMENTE desde la base de datos antes de guardar
+    console.log('🔄 Recalculando ventas desde BD antes de cerrar...');
+    
+    const { data: pedidosRefresh, error: errorPedidos } = await supabase
+      .from('pedidos')
+      .select(`
+        *,
+        medio_pago:medios_pago (nombre)
+      `)
+      .eq('estado', 'pagado')
+      .eq('cierre_id', cierreActual.id);
+    
+    if (errorPedidos) {
+      console.error('Error al recargar pedidos:', errorPedidos);
+      mostrarNotificacion('Error al consultar ventas: ' + errorPedidos.message, 'error');
+      return;
+    }
+    
+    console.log('📦 Pedidos encontrados al cerrar:', pedidosRefresh?.length);
+    
+    // Recalcular TODO desde los pedidos reales
+    let efectivoFinal = 0;
+    let tarjetaFinal = 0;
+    let transferenciaFinal = 0;
+    let totalFinal = 0;
+    let subtotalSinIvaFinal = 0;
+    let impuestoTotalFinal = 0;
+    
+    pedidosRefresh?.forEach(pedido => {
+      const medio = pedido.medio_pago?.nombre?.toLowerCase() || '';
+      const monto = pedido.total_neto || 0;
+      const impuesto = pedido.impuesto || 0;
+      
+      if (medio.includes('efectivo')) {
+        efectivoFinal += monto;
+      } else if (medio.includes('tarjeta')) {
+        tarjetaFinal += monto;
+      } else if (medio.includes('transferencia')) {
+        transferenciaFinal += monto;
+      } else {
+        efectivoFinal += monto;
+      }
+      totalFinal += monto;
+      subtotalSinIvaFinal += (monto - impuesto);
+      impuestoTotalFinal += impuesto;
+    });
+    
+    const ventasFinales = {
+      efectivo: efectivoFinal,
+      tarjeta: tarjetaFinal,
+      transferencia: transferenciaFinal,
+      total: totalFinal,
+      subtotal_sin_iva: subtotalSinIvaFinal,
+      impuesto_total: impuestoTotalFinal
+    };
+    
+    console.log('✅ Ventas finales recalculadas:', ventasFinales);
+    
+    // Recargar movimientos también
+    const { data: movimientosRefresh } = await supabase
+      .from('movimientos_caja')
+      .select('*')
+      .eq('cierre_id', cierreActual.id);
+    
+    const totalIngresos = (movimientosRefresh || []).filter(m => m.tipo === 'ingreso').reduce((s, m) => s + m.monto, 0);
+    const totalEgresos = (movimientosRefresh || []).filter(m => m.tipo === 'egreso').reduce((s, m) => s + m.monto, 0);
+    const efectivoEsperadoVal = cierreActual.apertura + ventasFinales.efectivo + totalIngresos - totalEgresos;
     const diferencia = efectivoContadoNum - efectivoEsperadoVal;
+    const fechaISOColombia = getColombiaISOString();
+    
+    console.log('💰 Efectivo esperado:', efectivoEsperadoVal);
+    console.log('💵 Efectivo contado:', efectivoContadoNum);
+    console.log('📊 Diferencia:', diferencia);
     
     try {
-      await supabase
+      // ✅ USAR ventasFinales calculadas desde BD, no el estado
+      const { error: updateError } = await supabase
         .from('cierres_caja')
         .update({
-          ventas_efectivo: ventasPeriodo.efectivo,
-          ventas_tarjeta: ventasPeriodo.tarjeta,
-          ventas_transferencia: ventasPeriodo.transferencia,
-          ventas_total: ventasPeriodo.total,
-          subtotal_sin_iva: ventasPeriodo.subtotal_sin_iva,
-          impuesto_total: ventasPeriodo.impuesto_total,
+          ventas_efectivo: ventasFinales.efectivo,
+          ventas_tarjeta: ventasFinales.tarjeta,
+          ventas_transferencia: ventasFinales.transferencia,
+          ventas_total: ventasFinales.total,
+          subtotal_sin_iva: ventasFinales.subtotal_sin_iva,
+          impuesto_total: ventasFinales.impuesto_total,
           efectivo_contado: efectivoContadoNum,
           diferencia: diferencia,
           observaciones: obs,
           cerrado: true,
-          cerrado_at: new Date().toISOString()
+          cerrado_at: fechaISOColombia
         })
         .eq('id', cierreActual.id);
       
+      if (updateError) throw updateError;
+      
+      console.log('✅ Cierre actualizado correctamente');
+      
+      // Actualizar estado local con los valores finales
+      setVentasPeriodo(ventasFinales);
+      setMovimientos(movimientosRefresh || []);
+      
+      // Generar PDF de cierre con datos finales
       const datosCierre = {
-        cierre: { ...cierreActual, cerrado_at: new Date().toISOString(), efectivo_contado: efectivoContadoNum, diferencia, observaciones: obs },
-        ventasPeriodo,
-        movimientos,
+        cierre: { 
+          ...cierreActual, 
+          cerrado_at: fechaISOColombia, 
+          efectivo_contado: efectivoContadoNum, 
+          diferencia, 
+          observaciones: obs,
+          // Usar ventas finales calculadas
+          ventas_efectivo: ventasFinales.efectivo,
+          ventas_tarjeta: ventasFinales.tarjeta,
+          ventas_transferencia: ventasFinales.transferencia,
+          ventas_total: ventasFinales.total,
+          subtotal_sin_iva: ventasFinales.subtotal_sin_iva,
+          impuesto_total: ventasFinales.impuesto_total
+        },
+        ventasPeriodo: ventasFinales,
+        movimientos: movimientosRefresh || [],
         pedidosPendientes,
         empresaData: configEmpresa
       };
@@ -351,25 +492,31 @@ export default function CajaPOSPage() {
       await generarPDFCierre(datosCierre);
       
       mostrarNotificacion(
-        `✅ Cierre de caja completado\nDiferencia: ${diferencia >= 0 ? '+' : ''}$${diferencia.toLocaleString()}\nSe ha generado el PDF de cierre.`,
+        `✅ Cierre de caja completado\nVentas: $${ventasFinales.total.toLocaleString()}\nDiferencia: ${diferencia >= 0 ? '+' : ''}$${diferencia.toLocaleString()}`,
         diferencia === 0 ? 'success' : diferencia > 0 ? 'warning' : 'error'
       );
       
       setModalCierreProfesional({ open: false });
       setEfectivoContado('');
       setObservaciones('');
-      await cargarDatos();
       
-      // Forzar recarga de layout para ocultar botón POS
+      // Limpiar estados locales
+      setCierreActual(null);
+      setCajaAbierta(false);
+      setMovimientos([]);
+      setVentasPeriodo({ efectivo: 0, tarjeta: 0, transferencia: 0, total: 0, subtotal_sin_iva: 0, impuesto_total: 0 });
+      
       localStorage.setItem('cajaAbierta', 'false');
       window.dispatchEvent(new Event('storage'));
       
+      await cargarDatos();
+      
       setTimeout(() => {
-        window.location.href = '/pos';
+        router.push('/pos/caja');
       }, 2000);
       
     } catch (error) {
-      console.error('Error:', error);
+      console.error('Error al cerrar caja:', error);
       mostrarNotificacion('Error al realizar cierre: ' + error.message, 'error');
     }
   }
@@ -417,8 +564,12 @@ export default function CajaPOSPage() {
             <p className="text-white/70 text-sm">Apertura y cierre de caja</p>
           </div>
           <div className="text-right">
-            <p className="text-sm text-white/70">{new Date().toLocaleDateString('es-CO')}</p>
-            <p className="text-xs text-white/60">{new Date().toLocaleTimeString()}</p>
+            <p className="text-sm text-white/70">
+              {new Date().toLocaleDateString('es-CO', { timeZone: 'America/Bogota' })}
+            </p>
+            <p className="text-xs text-white/60">
+              {new Date().toLocaleTimeString('es-CO', { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit' })}
+            </p>
           </div>
         </div>
       </header>
@@ -437,7 +588,7 @@ export default function CajaPOSPage() {
               {cajaAbierta && cierreActual && (
                 <p className="text-sm text-gray-600 mt-1">
                   Apertura: ${cierreActual.apertura?.toLocaleString()} | 
-                  Hora: {new Date(cierreActual.created_at).toLocaleTimeString()}
+                  Hora: {formatHoraOnly(cierreActual.created_at)}
                 </p>
               )}
             </div>
@@ -517,7 +668,7 @@ export default function CajaPOSPage() {
                     <div key={mov.id} className="flex justify-between items-center p-3 bg-[#F2F2F2] rounded-lg">
                       <div>
                         <p className="font-medium text-[#025373]">{mov.concepto}</p>
-                        <p className="text-xs text-[#595959]">{new Date(mov.created_at).toLocaleTimeString()}</p>
+                        <p className="text-xs text-[#595959]">{formatHoraOnly(mov.created_at)}</p>
                       </div>
                       <div className={`text-right font-bold ${mov.tipo === 'ingreso' ? 'text-green-600' : 'text-red-500'}`}>
                         {mov.tipo === 'ingreso' ? '+' : '-'}${mov.monto.toLocaleString()}
@@ -545,8 +696,9 @@ export default function CajaPOSPage() {
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="text-lg font-semibold text-[#025373] mb-4">🔒 Cierre de Caja</h2>
               
+              {/* ✅ MEJORADO: Usar la nueva función que recarga datos antes de abrir modal */}
               <button
-                onClick={() => setModalCierreProfesional({ open: true })}
+                onClick={abrirModalCierre}
                 disabled={pedidosPendientes.length > 0}
                 className="w-full py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white rounded-lg hover:from-orange-600 hover:to-red-600 transition-all font-semibold shadow-md disabled:opacity-50"
               >

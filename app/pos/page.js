@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase';
 import LoadingAnimation from '@/components/LoadingAnimation';
 import NotificationToast from '@/components/NotificationToast';
 import { imprimirTicket } from '@/components/TicketPrinter';
+import { getColombiaTime, getFechaColombiaStr, getColombiaISOString, formatFechaOnly, formatHoraOnly } from '@/lib/timezone';
 
 export default function POSPage() {
   const router = useRouter();
@@ -21,18 +22,15 @@ export default function POSPage() {
   const [busqueda, setBusqueda] = useState('');
   const [notificacion, setNotificacion] = useState({ show: false, message: '', type: 'success' });
   
-  // Estado de caja
   const [cajaAbierta, setCajaAbierta] = useState(false);
   const [cierreActivo, setCierreActivo] = useState(null);
   
-  // Modal para combos
   const [modalCombo, setModalCombo] = useState({ 
     open: false, 
     combo: null, 
     productosSeleccionados: [] 
   });
   
-  // Estados para el pedido
   const [modalResumen, setModalResumen] = useState(false);
   const [modalPago, setModalPago] = useState(false);
   const [procesando, setProcesando] = useState(false);
@@ -50,7 +48,6 @@ export default function POSPage() {
   
   const [pagoData, setPagoData] = useState({ monto_pagado: '', cambio: 0 });
 
-  // Configuración de la empresa para el ticket
   const [configEmpresa, setConfigEmpresa] = useState({
     nombre_restaurante: 'Mi Restaurante',
     direccion: 'Cra 1 # 0-00',
@@ -59,31 +56,25 @@ export default function POSPage() {
     mensaje_pie: '¡Gracias por su compra!'
   });
 
-  // VERIFICACIÓN INICIAL - Obtener caja abierta
   useEffect(() => {
     async function verificarCajaYRedirigir() {
-      const fecha = new Date().toISOString().split('T')[0];
+      const fechaStr = getFechaColombiaStr();
       
       const { data, error } = await supabase
         .from('cierres_caja')
         .select('*')
-        .eq('fecha', fecha)
+        .eq('fecha', fechaStr)
         .eq('cerrado', false)
         .maybeSingle();
-      
-      console.log('Verificando caja en POS:', { data, error });
+
+      console.log('Verificando caja activa en POS:', data);
       
       if (!data) {
-        // No hay caja abierta, redirigir a /pos/caja
-        console.log('No hay caja abierta, redirigiendo a /pos/caja');
         router.push('/pos/caja');
       } else {
-        // Hay caja abierta, guardar datos y cargar
-        console.log('Caja abierta encontrada:', data);
         setCajaAbierta(true);
         setCierreActivo(data);
         setVerificandoCajaInicial(false);
-        // Cargar todos los datos
         await cargarConfigEmpresa();
         await cargarDatosConCaja(data.id);
       }
@@ -92,26 +83,22 @@ export default function POSPage() {
     verificarCajaYRedirigir();
   }, [router]);
 
-  // Función para cargar datos después de tener el cierre activo
   async function cargarDatosConCaja(cierreId) {
     setCargando(true);
     
     try {
-      // Cargar categorías
       const { data: categoriasData } = await supabase
         .from('categorias')
         .select('*')
         .eq('activo', true)
         .order('nombre');
       
-      // Cargar productos activos
       const { data: productosData } = await supabase
         .from('productos')
         .select('*, categorias(*)')
         .eq('activo', true)
         .order('nombre');
       
-      // Cargar combos activos
       const { data: combosData } = await supabase
         .from('combos')
         .select(`
@@ -124,13 +111,11 @@ export default function POSPage() {
         .eq('activo', true)
         .order('nombre');
       
-      // Cargar configuración de IVA
       const { data: ivaData } = await supabase
         .from('config_iva')
         .select('*')
         .eq('activo', true);
       
-      // Cargar medios de pago
       const { data: mediosData } = await supabase
         .from('medios_pago')
         .select('*')
@@ -150,7 +135,6 @@ export default function POSPage() {
         setConfigPedido(prev => ({ ...prev, medio_pago_id: mediosData[0].id.toString() }));
       }
       
-      console.log('Datos cargados correctamente');
     } catch (error) {
       console.error('Error cargando datos:', error);
     } finally {
@@ -175,6 +159,10 @@ export default function POSPage() {
     }
   }
 
+  useEffect(() => {
+    filtrarProductos();
+  }, [productos, categoriaSeleccionada, busqueda]);
+
   function filtrarProductos() {
     let filtrados = [...productos];
     if (categoriaSeleccionada) {
@@ -185,11 +173,6 @@ export default function POSPage() {
     }
     setProductosFiltrados(filtrados);
   }
-
-  // Ejecutar filtrado cuando cambien los productos o filtros
-  useEffect(() => {
-    filtrarProductos();
-  }, [productos, categoriaSeleccionada, busqueda]);
 
   function agregarProductoAlCarrito(producto) {
     const itemExistente = carrito.find(i => i.id === producto.id && i.tipo !== 'combo');
@@ -339,6 +322,8 @@ export default function POSPage() {
       const { data: numeroFactura } = await supabase
         .rpc('generar_numero_factura', { p_tipo: 'ticket' });
       
+      const fechaISOColombia = getColombiaISOString();
+      
       const { data: pedido, error: pedidoError } = await supabase
         .from('pedidos')
         .insert({
@@ -357,7 +342,8 @@ export default function POSPage() {
           numero_factura: numeroFactura,
           tipo_documento: 'ticket',
           cierre_id: cierreActivo?.id,
-          pagado_at: new Date().toISOString()
+          pagado_at: fechaISOColombia,
+          created_at: fechaISOColombia
         })
         .select()
         .single();
@@ -444,7 +430,6 @@ export default function POSPage() {
     mostrarNotificacion('Pedido completado. ¡Listo para nuevo pedido!', 'success');
   }
 
-  // Mostrar loading mientras se verifica la caja inicialmente o se cargan datos
   if (verificandoCajaInicial || cargando) {
     return <LoadingAnimation />;
   }
@@ -479,7 +464,6 @@ export default function POSPage() {
 
       <div className="flex-1 container mx-auto p-4 overflow-hidden">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-full">
-          {/* Panel izquierdo - Productos */}
           <div className="lg:col-span-2 flex flex-col h-full bg-white rounded-xl shadow-sm overflow-hidden">
             <div className="p-4 border-b border-gray-100 space-y-3">
               <div className="relative">
@@ -563,7 +547,6 @@ export default function POSPage() {
             </div>
           </div>
 
-          {/* Panel derecho - Pedido Actual */}
           <div className="bg-white rounded-xl shadow-sm flex flex-col h-full overflow-hidden">
             <div className="p-4 border-b border-gray-100 bg-gradient-to-r from-[#F2F2F2] to-white">
               <h2 className="text-lg font-bold text-[#025373] flex items-center gap-2">
@@ -688,7 +671,7 @@ export default function POSPage() {
         </div>
       </div>
 
-      {/* MODAL DE SELECCIÓN DE PRODUCTOS DEL COMBO */}
+      {/* MODALES (Combo, Resumen, Pago) */}
       {modalCombo.open && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fadeIn">
           <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[80vh] overflow-hidden">
@@ -741,7 +724,6 @@ export default function POSPage() {
         </div>
       )}
 
-      {/* MODAL DE RESUMEN DE ORDEN */}
       {modalResumen && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fadeIn">
           <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
@@ -905,7 +887,6 @@ export default function POSPage() {
         </div>
       )}
 
-      {/* Modal de pago exitoso */}
       {modalPago && pedidoCompletado && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fadeIn">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full text-center">

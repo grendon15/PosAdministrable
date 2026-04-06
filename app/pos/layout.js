@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import Link from 'next/link';
@@ -12,60 +12,83 @@ export default function POSLayout({ children }) {
   const router = useRouter();
   const pathname = usePathname();
 
+  // ✅ Función centralizada para actualizar estado
+  const actualizarEstadoCaja = useCallback((estado) => {
+    setCajaAbierta(estado);
+    
+    // Si está en /pos y la caja se cerró → redirigir
+    if (!estado && pathname === '/pos') {
+      router.push('/pos/caja');
+    }
+  }, [pathname, router]);
+
+  // ✅ Consultar BD para saber estado real
+  async function verificarCajaAbierta() {
+    try {
+      const { data } = await supabase
+        .from('cierres_caja')
+        .select('id, cerrado')
+        .eq('cerrado', false)
+        .maybeSingle();
+      
+      actualizarEstadoCaja(!!data);
+    } catch (error) {
+      console.error('Error verificando caja:', error);
+    }
+  }
+
   useEffect(() => {
-    verificarSesion();
-    
-    const handleStorageChange = () => {
-      verificarCajaAbierta();
-    };
-    
-    window.addEventListener('storage', handleStorageChange);
-    
-    const interval = setInterval(() => {
-      if (!cargando) {
-        verificarCajaAbierta();
+    async function iniciar() {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (!session) {
+        router.push('/login');
+        return;
       }
-    }, 5000);
+      
+      setUser(session.user);
+      await verificarCajaAbierta();
+      setCargando(false);
+    }
     
-    return () => {
-      window.removeEventListener('storage', handleStorageChange);
-      clearInterval(interval);
-    };
+    iniciar();
   }, []);
 
-  async function verificarSesion() {
-    const { data: { session } } = await supabase.auth.getSession();
-    
-    if (!session) {
-      router.push('/login');
-      return;
-    }
-    
-    setUser(session.user);
-    await verificarCajaAbierta();
-    setCargando(false);
-  }
+  // ✅ Escuchar evento custom INMEDIATO (misma pestaña)
+  useEffect(() => {
+    const handleCajaCambiada = (e) => {
+      console.log('🔄 Evento recibido - Caja:', e.detail.abierta ? 'Abierta' : 'Cerrada');
+      actualizarEstadoCaja(e.detail.abierta);
+    };
 
-  async function verificarCajaAbierta() {
-    const fecha = new Date().toISOString().split('T')[0];
-    const { data } = await supabase
-      .from('cierres_caja')
-      .select('cerrado')
-      .eq('fecha', fecha)
-      .eq('cerrado', false)
-      .maybeSingle();
-    
-    const nuevaCajaAbierta = !!data;
-    
-    if (nuevaCajaAbierta !== cajaAbierta) {
-      setCajaAbierta(nuevaCajaAbierta);
-      
-      // Si la caja está cerrada y estamos en /pos, redirigir a /pos/caja
-      if (!nuevaCajaAbierta && pathname === '/pos') {
-        router.push('/pos/caja');
+    window.addEventListener('cajaEstadoCambiado', handleCajaCambiada);
+    return () => window.removeEventListener('cajaEstadoCambiado', handleCajaCambiada);
+  }, [actualizarEstadoCaja]);
+
+  // ✅ Escuchar localStorage (para sincronización entre pestañas)
+  useEffect(() => {
+    const handleStorage = (e) => {
+      if (e.key === 'cajaAbierta') {
+        const estado = e.newValue === 'true';
+        console.log('🔄 Storage cambiado - Caja:', estado ? 'Abierta' : 'Cerrada');
+        actualizarEstadoCaja(estado);
       }
-    }
-  }
+    };
+
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [actualizarEstadoCaja]);
+
+  // ✅ Intervalo cada 3 segundos consultando BD
+  useEffect(() => {
+    if (cargando) return;
+    
+    const interval = setInterval(() => {
+      verificarCajaAbierta();
+    }, 3000);
+    
+    return () => clearInterval(interval);
+  }, [cargando]);
 
   async function cerrarSesion() {
     await supabase.auth.signOut();
@@ -80,17 +103,49 @@ export default function POSLayout({ children }) {
     <div className="min-h-screen bg-[#F2F2F2]">
       <header className="bg-gradient-to-r from-[#025373] to-[#116EBF] text-white p-4 shadow-lg">
         <div className="container mx-auto flex justify-between items-center">
-          <div className="flex gap-6">
-            {/* Solo mostrar botón POS si la caja está abierta */}
+          <div className="flex items-center gap-6">
+            
+            {/* ✅ BOTÓN POS: Solo si caja está ABIERTA */}
             {cajaAbierta && (
-              <Link href="/pos" className={`font-medium ${pathname === '/pos' ? 'border-b-2 border-white' : 'text-white/80 hover:text-white transition-colors'}`}>
+              <Link 
+                href="/pos" 
+                className={`font-medium transition-colors ${
+                  pathname === '/pos' 
+                    ? 'border-b-2 border-white pb-1' 
+                    : 'text-white/80 hover:text-white'
+                }`}
+              >
                 🍽️ POS
               </Link>
             )}
-            <Link href="/pos/caja" className={`font-medium ${pathname === '/pos/caja' ? 'border-b-2 border-white' : 'text-white/80 hover:text-white transition-colors'}`}>
+            
+            {/* ✅ BOTÓN CAJA: Siempre visible */}
+            <Link 
+              href="/pos/caja" 
+              className={`font-medium transition-colors ${
+                pathname === '/pos/caja' 
+                  ? 'border-b-2 border-white pb-1' 
+                  : 'text-white/80 hover:text-white'
+              }`}
+            >
               💰 Caja
             </Link>
+
+            {/* ✅ INDICADOR EN TIEMPO REAL */}
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-all duration-300 ${
+              cajaAbierta 
+                ? 'bg-green-500/20 text-green-200 border border-green-500/30' 
+                : 'bg-red-500/20 text-red-200 border border-red-500/30'
+            }`}>
+              <span className={`w-2.5 h-2.5 rounded-full transition-all duration-300 ${
+                cajaAbierta 
+                  ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.6)] animate-pulse' 
+                  : 'bg-red-400'
+              }`}></span>
+              {cajaAbierta ? 'Caja Abierta' : 'Caja Cerrada'}
+            </div>
           </div>
+          
           <div className="flex items-center gap-4">
             <div className="text-right">
               <p className="text-sm text-white/80">{user?.email}</p>
